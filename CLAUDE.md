@@ -411,3 +411,10 @@ plugin-name.plugin (ZIP containing):
 │       └── references/
 └── README.md
 ```
+
+## My Defaults
+
+- **Primary county:** Summit County, Ohio
+- **Daily summaries:** send to Slack
+- **Preferred run time:** 9:00 AM
+- **Dispositions:** route to "First to Market (FTM)"

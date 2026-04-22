@@ -37,6 +37,8 @@ LOG_DIR.mkdir(exist_ok=True)
 # ── Credentials ────────────────────────────────────────────────────────
 TNPN_EMAIL = os.getenv("TNPN_EMAIL", "")
 TNPN_PASSWORD = os.getenv("TNPN_PASSWORD", "")
+ALN_EMAIL = os.getenv("ALN_EMAIL", "")              # Akron Legal News (Summit County, OH)
+ALN_PASSWORD = os.getenv("ALN_PASSWORD", "")
 CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY", "")  # 2Captcha API key
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")  # Claude Haiku for LLM parsing
 SMARTY_AUTH_ID = os.getenv("SMARTY_AUTH_ID", "")        # Smarty address standardization
@@ -54,6 +56,13 @@ ANCESTRY_PASSWORD = os.getenv("ANCESTRY_PASSWORD", "")
 DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY", "")            # Dropbox OAuth2 app key
 DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET", "")
 DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN", "")
+
+# Stark County CJIS guest-access cookies. Published as a public shared account
+# in the site's own homepage HTML (postLogin() call on the Continue As Guest
+# button). Not secret — overridable via env only as a fallback if the values
+# rotate and the scraper's auto-refresh from the homepage fails.
+STARK_CJIS_GUEST_ID = os.getenv("STARK_CJIS_GUEST_ID", "5c3f890cd92518333a8b2357")
+STARK_CJIS_GUEST_TOKEN = os.getenv("STARK_CJIS_GUEST_TOKEN", "d8c819df-920c-414b-9628-d3b42fe20cf8")
 
 # ── LLM Backend ──────────────────────────────────────────────────────
 LLM_BACKEND = os.getenv("LLM_BACKEND", "anthropic")           # "anthropic", "ollama", or "openrouter"

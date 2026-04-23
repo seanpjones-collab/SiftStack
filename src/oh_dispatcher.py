@@ -42,41 +42,80 @@ OHIO_NOTICE_TYPES: tuple[str, ...] = ("foreclosure", "probate")
 # Each adapter wraps one source-specific entry point so the dispatcher can
 # treat all 6 uniformly. Sync scrapers are wrapped in asyncio.to_thread so
 # the dispatcher can await them alongside the async ones.
+#
+# `extra` is a per-scraper dict of optional kwargs (e.g. stark probate
+# uses hint_high=<int> to skip its binary-search watermark probe when the
+# KVS already knows yesterday's high). Unknown keys are ignored per
+# adapter — the Apify KVS restore logic can pass a single blob and let
+# each adapter pick what applies.
 
 
-async def _cuyahoga_foreclosure(start: date, end: date) -> list[NoticeData]:
+async def _cuyahoga_foreclosure(
+    start: date, end: date, *, proxy_url: Optional[str] = None,
+    extra: Optional[dict] = None,
+) -> list[NoticeData]:
     from cuyahoga_foreclosure_scraper import scrape_cuyahoga_all_sources
-    return await scrape_cuyahoga_all_sources(start_date=start, end_date=end)
+    return await scrape_cuyahoga_all_sources(
+        start_date=start, end_date=end, proxy_url=proxy_url,
+    )
 
 
-async def _cuyahoga_probate(start: date, end: date) -> list[NoticeData]:
+async def _cuyahoga_probate(
+    start: date, end: date, *, proxy_url: Optional[str] = None,
+    extra: Optional[dict] = None,
+) -> list[NoticeData]:
     from cuyahoga_probate_scraper import scrape_cuyahoga_probate
     return await asyncio.to_thread(
-        scrape_cuyahoga_probate, start_date=start, end_date=end,
+        scrape_cuyahoga_probate,
+        start_date=start, end_date=end, proxy_url=proxy_url,
     )
 
 
-async def _summit_foreclosure(start: date, end: date) -> list[NoticeData]:
+async def _summit_foreclosure(
+    start: date, end: date, *, proxy_url: Optional[str] = None,
+    extra: Optional[dict] = None,
+) -> list[NoticeData]:
     from summit_foreclosure_scraper import scrape_summit_all_sources
-    return await scrape_summit_all_sources(start_date=start, end_date=end)
+    return await scrape_summit_all_sources(
+        start_date=start, end_date=end, proxy_url=proxy_url,
+    )
 
 
-async def _summit_probate(start: date, end: date) -> list[NoticeData]:
+async def _summit_probate(
+    start: date, end: date, *, proxy_url: Optional[str] = None,
+    extra: Optional[dict] = None,
+) -> list[NoticeData]:
     from summit_probate_scraper import scrape_summit_probate
-    return await scrape_summit_probate(start_date=start, end_date=end)
+    return await scrape_summit_probate(
+        start_date=start, end_date=end, proxy_url=proxy_url,
+    )
 
 
-async def _stark_foreclosure(start: date, end: date) -> list[NoticeData]:
+async def _stark_foreclosure(
+    start: date, end: date, *, proxy_url: Optional[str] = None,
+    extra: Optional[dict] = None,
+) -> list[NoticeData]:
     from stark_cjis_scraper import scrape_stark_foreclosures
     return await asyncio.to_thread(
-        scrape_stark_foreclosures, start_date=start, end_date=end,
+        scrape_stark_foreclosures,
+        start_date=start, end_date=end, proxy_url=proxy_url,
     )
 
 
-async def _stark_probate(start: date, end: date) -> list[NoticeData]:
+async def _stark_probate(
+    start: date, end: date, *, proxy_url: Optional[str] = None,
+    extra: Optional[dict] = None,
+) -> list[NoticeData]:
     from stark_probate_scraper import scrape_stark_probate
+    # extra may carry the previous day's high watermark so we skip the
+    # ~15 GET binary search. Ignored if absent.
+    hint_high = None
+    if extra:
+        hint_high = extra.get("stark_probate_watermark")
     return await asyncio.to_thread(
-        scrape_stark_probate, start_date=start, end_date=end,
+        scrape_stark_probate,
+        start_date=start, end_date=end, proxy_url=proxy_url,
+        hint_high=hint_high,
     )
 
 
@@ -96,35 +135,52 @@ _ADAPTERS: dict[tuple[str, str], Callable] = {
 
 async def scrape_ohio_all(
     *,
-    start_date: date,
-    end_date: date,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    per_scraper_windows: Optional[dict[tuple[str, str], tuple[date, date]]] = None,
     counties: Optional[list[str]] = None,
     types: Optional[list[str]] = None,
     on_batch: Optional[Callable[[list[NoticeData], str], None]] = None,
-) -> list[NoticeData]:
-    """Fan out to the matching (county, notice_type) scrapers, return merged results.
+    proxy_url: Optional[str] = None,
+    extra: Optional[dict] = None,
+) -> dict:
+    """Fan out to the matching (county, notice_type) scrapers.
 
-    Scrapers are run SEQUENTIALLY (not in parallel) to avoid hammering
-    courthouse portals and to keep logs readable. The typical full run
-    (3 counties × 2 types over a 7-day window) takes 3-5 minutes dominated
-    by the Summit clerkweb Playwright flow and the Stark case-number walk.
+    Runs SEQUENTIALLY so a slow county doesn't starve others out. Each
+    scraper uses its own date window from `per_scraper_windows` when
+    provided, otherwise falls back to the shared `start_date`/`end_date`.
 
     Args:
-        start_date / end_date: Inclusive filing-date window. Applied
-            client-side per scraper (each scraper has its own filter).
-        counties: County names to include (case-insensitive). None = all
-            three Ohio counties. Unknown names are logged and ignored.
-        types: Notice types (case-insensitive). None = foreclosure + probate.
-        on_batch: Optional callback invoked after each (county, type) batch
-            completes, with (batch_notices, label) — useful for Apify
-            `Actor.push_data()` incremental persistence.
+        start_date / end_date: Fallback inclusive window, used when a
+            (county, type) pair isn't in `per_scraper_windows`.
+        per_scraper_windows: Dict of (county_lower, ntype_lower) → (start, end).
+            Lets the Apify actor give each scraper its own catch-up range
+            from its `last_successful_scrape_date` KVS state. If a pair's
+            window is [after, before] (start > end) the scraper is skipped
+            as caught-up.
+        counties / types: Case-insensitive inclusion filters. None = all.
+        on_batch: Optional callback after each (county, type) batch finishes,
+            receives (batch_notices, label). Used for Apify Dataset pushes.
+        proxy_url: Apify residential proxy URL (threaded through every scraper).
+        extra: Per-scraper bag — currently stark_probate_watermark.
 
     Returns:
-        Merged list of NoticeData across all matching (county, type) pairs.
-        Empty list if no tuples match the filters.
+        dict with keys:
+          - records: list[NoticeData] — merged across all scrapers
+          - success: dict[(county, ntype), bool] — True if the scraper
+             completed without raising (retries inside the scraper don't
+             count as failures). Actor uses this to decide which
+             last_successful_scrape_date KVS entries to advance.
+          - end_dates: dict[(county, ntype), date] — the end of each
+             scraper's window (what to save to KVS on success).
+          - skipped: set[(county, ntype)] — scrapers skipped due to caught-up
+             window (start > end).
     """
-    if start_date > end_date:
-        raise ValueError("start_date > end_date")
+    # ── Normalize / validate windows ──
+    if per_scraper_windows is None:
+        per_scraper_windows = {}
+    if start_date and end_date and start_date > end_date:
+        raise ValueError("fallback start_date > end_date")
 
     # Normalize filters
     wanted_counties = (
@@ -169,29 +225,72 @@ async def scrape_ohio_all(
     if not run_list:
         logger.warning("oh dispatcher: no (county, notice_type) pairs matched "
                        "filters — nothing to scrape")
-        return []
+        return {"records": [], "success": {}, "end_dates": {}, "skipped": set()}
 
-    logger.info(
-        "oh dispatcher: window %s → %s, running %d scraper%s",
-        start_date.isoformat(), end_date.isoformat(),
-        len(run_list), "" if len(run_list) == 1 else "s",
-    )
+    logger.info("oh dispatcher: running %d scraper%s",
+                len(run_list), "" if len(run_list) == 1 else "s")
+
+    # Install the urllib default opener once at the top so sync adapters
+    # that read urllib.request.urlopen() (dln, cuyahoga_probate, stark_probate)
+    # all route through the proxy even when called via asyncio.to_thread.
+    if proxy_url:
+        from proxy_config import install_urllib_proxy
+        install_urllib_proxy(proxy_url)
 
     merged: list[NoticeData] = []
+    success: dict[tuple[str, str], bool] = {}
+    end_dates: dict[tuple[str, str], date] = {}
+    skipped: set[tuple[str, str]] = set()
+
     for county, ntype, fn in run_list:
         label = f"{county} {ntype}"
-        logger.info("oh dispatcher: ---- %s ----", label)
+        key = (county.lower(), ntype)
+
+        # Resolve this scraper's window — prefer per-scraper, fall back to shared
+        window = per_scraper_windows.get(key)
+        if window is None:
+            if start_date is None or end_date is None:
+                logger.warning(
+                    "oh dispatcher: %s has no window (no per_scraper_windows "
+                    "entry and no fallback start/end_date) — skipping",
+                    label,
+                )
+                skipped.add(key)
+                continue
+            s_date, e_date = start_date, end_date
+        else:
+            s_date, e_date = window
+
+        if s_date > e_date:
+            logger.info(
+                "oh dispatcher: %s is caught up (window %s → %s has no days "
+                "to scrape) — skipping",
+                label, s_date.isoformat(), e_date.isoformat(),
+            )
+            skipped.add(key)
+            continue
+
+        logger.info("oh dispatcher: ---- %s (%s → %s) ----",
+                    label, s_date.isoformat(), e_date.isoformat())
+        end_dates[key] = e_date  # remember target end for KVS update on success
+
         try:
-            batch = await fn(start_date, end_date)
+            batch = await fn(s_date, e_date,
+                             proxy_url=proxy_url, extra=extra)
         except Exception as exc:
             # One scraper failing shouldn't kill the whole morning run.
-            # Log, continue to the next.
+            # Log, mark failed, continue. KVS last_successful date does NOT
+            # advance for this scraper — tomorrow's run re-attempts this window.
+            success[key] = False
             logger.exception(
                 "oh dispatcher: %s failed (%s) — continuing with remaining "
-                "scrapers; check logs for details",
+                "scrapers; check logs for details. KVS date will NOT advance "
+                "so tomorrow's run will re-attempt this window.",
                 label, exc,
             )
             continue
+
+        success[key] = True
         logger.info("oh dispatcher: %s returned %d records", label, len(batch))
         merged.extend(batch)
         if on_batch is not None:
@@ -201,7 +300,16 @@ async def scrape_ohio_all(
                 logger.warning("oh dispatcher: on_batch callback failed for "
                                "%s: %s", label, exc)
 
-    logger.info("oh dispatcher: total %d records across %d scraper%s",
-                len(merged), len(run_list),
-                "" if len(run_list) == 1 else "s")
-    return merged
+    passed = sum(1 for v in success.values() if v)
+    failed = sum(1 for v in success.values() if not v)
+    logger.info(
+        "oh dispatcher: total %d records — scrapers: %d succeeded, %d failed, "
+        "%d skipped (caught up)",
+        len(merged), passed, failed, len(skipped),
+    )
+    return {
+        "records": merged,
+        "success": success,
+        "end_dates": end_dates,
+        "skipped": skipped,
+    }

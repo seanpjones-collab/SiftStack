@@ -1,7 +1,10 @@
 # Credentials & secrets
 .env
 input.json
+input.cloud.json
 input_foreclosure_daily.json
+apify_run.log
+apify_cloud.log
 
 # State files (generated at runtime)
 last_run.json

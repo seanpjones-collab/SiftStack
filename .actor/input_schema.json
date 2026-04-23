@@ -1,13 +1,13 @@
 {
-    "title": "SiftStack Input",
+    "title": "SiftStack OH Input",
     "type": "object",
     "schemaVersion": 1,
-    "required": ["mode", "tn_username", "tn_password", "captcha_api_key"],
+    "required": ["mode"],
     "properties": {
         "mode": {
             "title": "Scrape Mode",
             "type": "string",
-            "description": "daily = new notices since last run; historical = last 12 months",
+            "description": "daily = new filings since last run (uses KVS last_run_date); historical = 365-day backfill",
             "enum": ["daily", "historical"],
             "default": "daily",
             "editor": "select"
@@ -15,7 +15,7 @@
         "counties": {
             "title": "Counties",
             "type": "array",
-            "description": "Counties to scrape. Leave empty for all (Knox + Blount).",
+            "description": "Counties to scrape. Valid values: Cuyahoga, Summit, Stark. Leave empty for all three.",
             "items": { "type": "string" },
             "default": [],
             "editor": "stringList"
@@ -23,198 +23,169 @@
         "types": {
             "title": "Notice Types",
             "type": "array",
-            "description": "Notice types to scrape. Currently only foreclosure is supported.",
+            "description": "Notice types to scrape. Valid values: foreclosure, probate. Leave empty for both.",
             "items": { "type": "string" },
-            "default": ["foreclosure"],
+            "default": [],
             "editor": "stringList"
         },
         "since_date": {
-            "title": "Since Date",
+            "title": "Since Date (override)",
             "type": "string",
-            "description": "Pull notices published on or after this date (YYYY-MM-DD). Overrides mode-based date logic.",
+            "description": "Pull filings on or after this date (YYYY-MM-DD). Overrides mode-based date window and the stored last_run_date in KVS.",
             "editor": "textfield",
             "default": ""
         },
-        "start_page": {
-            "title": "Start Page",
-            "type": "integer",
-            "description": "Page number to start scraping from (default 1). Use to resume a previous run without re-scraping earlier pages.",
-            "default": 1,
-            "minimum": 1,
-            "editor": "number"
-        },
-        "tn_username": {
-            "title": "tnpublicnotice.com Email",
-            "type": "string",
-            "description": "Login email for tnpublicnotice.com Smart Search",
-            "editor": "textfield",
-            "isSecret": true
-        },
-        "tn_password": {
-            "title": "tnpublicnotice.com Password",
-            "type": "string",
-            "description": "Login password for tnpublicnotice.com",
-            "editor": "textfield",
-            "isSecret": true
-        },
-        "captcha_api_key": {
-            "title": "2Captcha API Key",
-            "type": "string",
-            "description": "API key from 2captcha.com for reCAPTCHA solving",
-            "editor": "textfield",
-            "isSecret": true
-        },
         "use_residential_proxy": {
-            "title": "Use Residential Proxy",
+            "title": "Route traffic through Apify residential proxy",
             "type": "boolean",
-            "description": "Route requests through Apify residential proxies to avoid IP blocks.",
+            "description": "STRONGLY RECOMMENDED. Routes every HTTP call from every scraper (Playwright, requests, urllib) through Apify's RESIDENTIAL proxy group. Turning this off sends raw traffic from the Apify datacenter IP block — civil-authority portals may rate-limit or block repeat hits.",
             "default": true,
             "editor": "checkbox"
         },
-        "google_drive_folder_id": {
-            "title": "Google Drive Folder ID",
+        "apify_proxy_url": {
+            "title": "Apify Proxy URL (direct override)",
             "type": "string",
-            "description": "Google Drive folder ID for CSV upload. Leave empty to skip Drive upload.",
+            "description": "Full proxy URL including password, e.g. http://groups-RESIDENTIAL:<password>@proxy.apify.com:8000 — copy from Apify Console → Proxy → Residential connection URL. When set, this bypasses the SDK's create_proxy_configuration() call (which hits the 'Proxy external access' gate). Leave empty to use the SDK path.",
             "editor": "textfield",
-            "default": ""
-        },
-        "google_service_account_key": {
-            "title": "Google Service Account Key (base64)",
-            "type": "string",
-            "description": "Base64-encoded JSON key for the Google service account. Required if google_drive_folder_id is set.",
-            "editor": "textarea",
             "isSecret": true
         },
         "anthropic_api_key": {
             "title": "Anthropic API Key",
             "type": "string",
-            "description": "API key for Claude Haiku LLM parsing. When set, notices that fail regex parsing are sent to Claude for structured extraction. Optional but recommended.",
+            "description": "API key for Claude Haiku. Enables obituary search + LLM field extraction. Optional but recommended — without it, probate records have no DM detection.",
             "editor": "textfield",
             "isSecret": true
         },
         "smarty_auth_id": {
             "title": "Smarty Auth ID",
             "type": "string",
-            "description": "Auth ID from smarty.com for USPS address standardization. When set (with auth token), addresses are batch-standardized with geocoding, vacancy detection, and ZIP+4. Optional.",
+            "description": "Smarty US-Address-Verification auth ID for address standardization + ZIP+4 + vacancy/RDI detection. Pairs with smarty_auth_token. Optional.",
             "editor": "textfield",
             "isSecret": true
         },
         "smarty_auth_token": {
             "title": "Smarty Auth Token",
             "type": "string",
-            "description": "Auth token from smarty.com (paired with Auth ID). Required if smarty_auth_id is set.",
+            "description": "Paired with smarty_auth_id.",
             "editor": "textfield",
             "isSecret": true
         },
         "openwebninja_api_key": {
-            "title": "OpenWeb Ninja API Key (Zillow Enrichment)",
+            "title": "OpenWeb Ninja API Key (Zillow enrichment)",
             "type": "string",
-            "description": "API key from openwebninja.com for the Real-Time Zillow Data API. Enriches properties with MLS status, Zestimate, equity estimate, and property type. Free tier: 100 requests/month. Optional.",
+            "description": "API key from openwebninja.com for Real-Time Zillow Data API. Adds MLS status, Zestimate, equity estimate, property type. Optional.",
             "editor": "textfield",
             "isSecret": true
         },
         "serper_api_key": {
             "title": "Serper.dev API Key",
             "type": "string",
-            "description": "API key from serper.dev for Google Search. Used for DM address lookup via people search sites. Free tier: 2,500 queries. Optional.",
+            "description": "Google Search API. Used for DM address lookup via people-search sites. Optional.",
             "editor": "textfield",
             "isSecret": true
         },
         "firecrawl_api_key": {
             "title": "Firecrawl API Key",
             "type": "string",
-            "description": "API key from firecrawl.dev for JS-rendered page scraping. Used for DM address extraction from people search sites. Free tier: 500 pages. Optional.",
+            "description": "JS-rendered scraping for people-search extraction. Optional.",
             "editor": "textfield",
             "isSecret": true
         },
         "tracerfy_api_key": {
             "title": "Tracerfy API Key",
             "type": "string",
-            "description": "API key from tracerfy.com for skip tracing. Provides guaranteed DM mailing addresses at $0.02/record. Optional.",
+            "description": "Tracerfy skip trace for DP candidates (deceased owners, heirs, DMs). $0.02/record. Optional.",
             "editor": "textfield",
             "isSecret": true
         },
         "trestle_api_key": {
             "title": "Trestle API Key",
             "type": "string",
-            "description": "API key from trestleiq.com for phone validation scoring. Assigns 5-tier dial priority to phone numbers. Optional.",
+            "description": "Phone validation scoring. Assigns 5-tier dial priority to phone numbers surfaced in DP reports. Optional.",
+            "editor": "textfield",
+            "isSecret": true
+        },
+        "aln_email": {
+            "title": "Akron Legal News Email",
+            "type": "string",
+            "description": "Login for akronlegalnews.com — Summit County service-by-publication supplement (lis pendens). Optional; Summit scraper falls back to clerkweb-only without it.",
+            "editor": "textfield",
+            "isSecret": true
+        },
+        "aln_password": {
+            "title": "Akron Legal News Password",
+            "type": "string",
+            "description": "Paired with aln_email.",
             "editor": "textfield",
             "isSecret": true
         },
         "datasift_email": {
             "title": "DataSift Email",
             "type": "string",
-            "description": "Login email for DataSift.ai (app.reisift.io). Required for automatic CRM upload after scraping.",
+            "description": "Login email for DataSift.ai (app.reisift.io). Exposed here for env-var parity; Apify actor does not auto-upload — generated DataSift CSVs are saved to KVS for manual upload at app.reisift.io → Upload File.",
             "editor": "textfield",
             "isSecret": true
         },
         "datasift_password": {
             "title": "DataSift Password",
             "type": "string",
-            "description": "Login password for DataSift.ai. Required for automatic CRM upload.",
+            "description": "Paired with datasift_email.",
             "editor": "textfield",
             "isSecret": true
         },
         "slack_webhook_url": {
             "title": "Slack/Discord Webhook URL",
             "type": "string",
-            "description": "Webhook URL for run summary notifications. Works with Slack incoming webhooks or Discord /slack endpoints. Optional.",
+            "description": "Webhook for run summary + DataSift CSV links + PDF links. Works with Slack incoming webhooks or Discord /slack endpoints.",
             "editor": "textfield",
             "isSecret": true
         },
-        "upload_datasift": {
-            "title": "Upload to DataSift",
-            "type": "boolean",
-            "description": "Automatically upload enriched records to DataSift.ai CRM after scraping. Requires datasift_email and datasift_password.",
-            "default": true,
-            "editor": "checkbox"
+        "google_drive_folder_id": {
+            "title": "Google Drive Folder ID",
+            "type": "string",
+            "description": "Drive folder ID for CSV + summary upload. Leave empty to skip.",
+            "editor": "textfield",
+            "default": ""
         },
-        "enrich_datasift": {
-            "title": "Enrich in DataSift",
-            "type": "boolean",
-            "description": "Run DataSift's Enrich Property Information (SiftMap) after upload. Adds beds, baths, Zestimate, etc.",
-            "default": true,
-            "editor": "checkbox"
-        },
-        "skip_trace_datasift": {
-            "title": "Skip Trace in DataSift",
-            "type": "boolean",
-            "description": "Run DataSift's built-in Skip Trace after upload. Pulls phone numbers and emails via unlimited plan.",
-            "default": true,
-            "editor": "checkbox"
+        "google_service_account_key": {
+            "title": "Google Service Account Key (base64 JSON)",
+            "type": "string",
+            "description": "Base64-encoded service-account JSON for Drive upload. Required if google_drive_folder_id is set.",
+            "editor": "textarea",
+            "isSecret": true
         },
         "run_tracerfy": {
             "title": "Run Tracerfy Skip Trace",
             "type": "boolean",
-            "description": "Run Tracerfy batch skip trace before DataSift upload. Populates phone/email fields in the CSV. Requires tracerfy_api_key.",
+            "description": "Run Tracerfy on deep-prospecting candidates (deceased owners / heirs / DMs). Requires tracerfy_api_key.",
             "default": true,
             "editor": "checkbox"
         },
         "notify_slack": {
             "title": "Send Slack Notification",
             "type": "boolean",
-            "description": "Send a run summary to Slack/Discord after pipeline completes. Also sends error alerts on failure. Requires slack_webhook_url.",
+            "description": "Post run summary + DataSift CSV links + PDF links to slack_webhook_url.",
             "default": true,
             "editor": "checkbox"
         },
         "include_vacant": {
             "title": "Include Vacant Land",
             "type": "boolean",
-            "description": "Keep vacant land parcels (no house number). Default OFF — turn ON if your buy box includes land deals.",
+            "description": "Keep vacant-land parcels (no house number). OFF by default.",
             "default": false,
             "editor": "checkbox"
         },
         "include_commercial": {
             "title": "Include Commercial Properties",
             "type": "boolean",
-            "description": "Keep commercial properties (Smarty RDI = Commercial). Default OFF — turn ON if your buy box includes commercial.",
+            "description": "Keep commercial parcels (Smarty RDI = Commercial). OFF by default.",
             "default": false,
             "editor": "checkbox"
         },
         "include_entities": {
             "title": "Include Entity-Owned Properties",
             "type": "boolean",
-            "description": "Keep LLC/Corp/Trust-owned records without filtering. Default OFF — entities are removed unless a person is found behind them.",
+            "description": "Keep LLC/Corp/Trust-owned records without filtering. OFF by default (entities removed unless a person is found behind them).",
             "default": false,
             "editor": "checkbox"
         }

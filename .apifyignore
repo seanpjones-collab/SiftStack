@@ -38,3 +38,7 @@ dropbox_state.json
 photo_state.json
 *.tmp
 *.bak
+tmp/
+explore_*.py
+test_*.py
+generate_ohio_sources_report.py

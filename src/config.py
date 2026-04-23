@@ -138,9 +138,12 @@ SAVED_SEARCHES: list[SavedSearch] = [
 # Ohio counties covered by oh_dispatcher.scrape_ohio_all()
 OHIO_COUNTIES: tuple[str, ...] = ("Cuyahoga", "Summit", "Stark")
 
-# How many days back a `daily` run looks when no explicit window is given.
-# Covers weekend gaps + late filings published days after the docket entry.
-OH_DAILY_LOOKBACK_DAYS: int = 7
+# How many days back a `daily` run looks when a scraper has no KVS history
+# (first-ever run or fresh `apify run --purge`). Normal daily cadence uses
+# per-scraper last_successful_scrape_date in KVS to compute exactly the
+# catch-up window [last_successful + 1, today - 1]. This constant is only
+# the bootstrap fallback — for daily operation we scrape yesterday only.
+OH_DAILY_LOOKBACK_DAYS: int = 1
 
 # `historical` mode default window (days). Mirrors the TN pipeline's
 # "last 12 months" default.

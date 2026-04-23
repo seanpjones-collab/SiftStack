@@ -123,21 +123,51 @@ async def scrape_cuyahoga_all_sources(
     include_unclassified: bool = False,
     include_dln: bool = True,
     headed: bool = False,
+    proxy_url: Optional[str] = None,
 ) -> list[NoticeData]:
     """Run both Cuyahoga sources and return a deduped list.
 
     Dedup key precedence: canonical parcel ID, then (street-num + city +
     owner-last-name). cpdocket wins on conflict. DLN-only records are kept.
     """
+    # cpdocket is IP-quality sensitive — ASP.NET ViewState / form-submit
+    # behavior varies per residential IP. Retry with a fresh browser context
+    # (= fresh TCP tunnel = likely different residential IP from the Apify
+    # proxy pool rotation) up to 5 attempts before giving up.
     logger.info("=== Cuyahoga cpdocket (primary) ===")
-    cp_records = await scrape_cuyahoga_cpdocket_foreclosures(
-        start_date=start_date,
-        end_date=end_date,
-        filing_types=filing_types,
-        include_unclassified=include_unclassified,
-        headed=headed,
-    )
-    logger.info("cpdocket: %d records", len(cp_records))
+    cp_records: list[NoticeData] = []
+    last_exc: Optional[BaseException] = None
+    MAX_CPDOCKET_ATTEMPTS = 5
+    for attempt in range(1, MAX_CPDOCKET_ATTEMPTS + 1):
+        try:
+            cp_records = await scrape_cuyahoga_cpdocket_foreclosures(
+                start_date=start_date,
+                end_date=end_date,
+                filing_types=filing_types,
+                include_unclassified=include_unclassified,
+                headed=headed,
+                proxy_url=proxy_url,
+            )
+            logger.info("cpdocket: %d records (attempt %d/%d)",
+                        len(cp_records), attempt, MAX_CPDOCKET_ATTEMPTS)
+            break
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(
+                "cpdocket attempt %d/%d failed: %s — retrying with fresh "
+                "browser + fresh proxy tunnel",
+                attempt, MAX_CPDOCKET_ATTEMPTS, exc,
+            )
+            if attempt < MAX_CPDOCKET_ATTEMPTS:
+                # Exponential backoff: 5s, 10s, 15s, 20s
+                await asyncio.sleep(5 * attempt)
+    else:
+        # All attempts exhausted — propagate the last error so the dispatcher
+        # marks this scraper as failed (and Sean sees it in the per-scraper
+        # success map instead of silently getting an empty list).
+        raise RuntimeError(
+            f"cpdocket failed after {MAX_CPDOCKET_ATTEMPTS} attempts: {last_exc}"
+        ) from last_exc
 
     dln_records: list[NoticeData] = []
     if include_dln:
@@ -146,6 +176,7 @@ async def scrape_cuyahoga_all_sources(
             start_date=start_date,
             end_date=end_date,
             categories=dln_categories,
+            proxy_url=proxy_url,
         )
         logger.info("DLN: %d records", len(dln_records))
     else:

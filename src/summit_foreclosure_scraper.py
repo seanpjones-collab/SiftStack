@@ -73,7 +73,9 @@ def _notice_case_no(n: NoticeData) -> str:
 
 # ── ALN wrapper (lazy import — ALN requires Playwright + ALN credentials) ─
 
-async def _scrape_aln_foreclosures_today() -> list[NoticeData]:
+async def _scrape_aln_foreclosures_today(
+    *, proxy_url: Optional[str] = None,
+) -> list[NoticeData]:
     """Pull ALN's current /notices/foreclosures page. Foreclosure-only filter
     applied upstream in aln_scraper. Returns [] on credential/login failure
     — ALN is a supplement, never a hard blocker.
@@ -87,7 +89,10 @@ async def _scrape_aln_foreclosures_today() -> list[NoticeData]:
         logger.warning("aln_scraper import failed: %s", exc)
         return []
     try:
-        records = await aln_scrape_all(headed=False, from_date=None, to_date=None)
+        records = await aln_scrape_all(
+            headed=False, from_date=None, to_date=None,
+            proxy_url=proxy_url,
+        )
     except Exception as exc:
         logger.warning("ALN scrape failed: %s", exc)
         return []
@@ -105,6 +110,7 @@ async def scrape_summit_all_sources(
     include_unclassified: bool = False,
     include_aln: bool = True,
     headed: bool = False,
+    proxy_url: Optional[str] = None,
 ) -> list[NoticeData]:
     """Run both sources and return a deduped NoticeData list.
 
@@ -116,23 +122,48 @@ async def scrape_summit_all_sources(
         include_aln: If False, skip ALN entirely (clerkweb-only run).
     """
     # 1. clerkweb (primary, deterministic date window)
+    # Flaky through residential proxies — Playwright session timeouts, LoginRequired
+    # redirects, and ASP.NET ViewState expirations all show up on certain IPs.
+    # Retry with a fresh browser context (→ fresh TCP tunnel → likely different
+    # residential IP from Apify's pool rotation) up to 5 attempts.
     logger.info("=== Summit clerkweb (primary) ===")
-    clerk_records = await scrape_summit_clerk_foreclosures(
-        start_date=start_date,
-        end_date=end_date,
-        months=months,
-        case_types=case_types,
-        include_unclassified=include_unclassified,
-        headed=headed,
-    )
-    logger.info("clerkweb: %d records", len(clerk_records))
+    clerk_records: list[NoticeData] = []
+    last_exc: Optional[BaseException] = None
+    MAX_CLERKWEB_ATTEMPTS = 5
+    for attempt in range(1, MAX_CLERKWEB_ATTEMPTS + 1):
+        try:
+            clerk_records = await scrape_summit_clerk_foreclosures(
+                start_date=start_date,
+                end_date=end_date,
+                months=months,
+                case_types=case_types,
+                include_unclassified=include_unclassified,
+                headed=headed,
+                proxy_url=proxy_url,
+            )
+            logger.info("clerkweb: %d records (attempt %d/%d)",
+                        len(clerk_records), attempt, MAX_CLERKWEB_ATTEMPTS)
+            break
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(
+                "clerkweb attempt %d/%d failed: %s — retrying with fresh "
+                "browser + fresh proxy tunnel",
+                attempt, MAX_CLERKWEB_ATTEMPTS, exc,
+            )
+            if attempt < MAX_CLERKWEB_ATTEMPTS:
+                await asyncio.sleep(5 * attempt)
+    else:
+        raise RuntimeError(
+            f"clerkweb failed after {MAX_CLERKWEB_ATTEMPTS} attempts: {last_exc}"
+        ) from last_exc
 
     # 2. ALN (supplement, "today's active notices" only — cheap and catches
     #    service-by-publication cases that may not be in clerkweb's window)
     aln_records: list[NoticeData] = []
     if include_aln:
         logger.info("=== Akron Legal News (supplement) ===")
-        aln_records = await _scrape_aln_foreclosures_today()
+        aln_records = await _scrape_aln_foreclosures_today(proxy_url=proxy_url)
         logger.info("ALN: %d foreclosure records", len(aln_records))
     else:
         logger.info("ALN pull skipped (--no-aln)")

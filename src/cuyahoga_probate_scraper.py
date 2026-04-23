@@ -285,6 +285,7 @@ def scrape_cuyahoga_probate(
     end_date: date,
     per_page: int = 100,
     max_pages: int = 100,
+    proxy_url: Optional[str] = None,
 ) -> list[NoticeData]:
     """Pull Cuyahoga probate estate openings filed in [start_date, end_date].
 
@@ -294,6 +295,11 @@ def scrape_cuyahoga_probate(
     """
     if start_date > end_date:
         raise ValueError("start_date > end_date")
+
+    # Route urllib.request.urlopen() through the Apify residential proxy when
+    # configured. No-op if proxy_url is None (CLI / dev path).
+    from proxy_config import install_urllib_proxy
+    install_urllib_proxy(proxy_url)
 
     stats = {
         "emitted": 0,

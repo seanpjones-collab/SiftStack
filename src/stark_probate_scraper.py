@@ -455,6 +455,7 @@ def scrape_stark_probate(
     end_date: date,
     hint_high: Optional[int] = None,
     walk_budget: int = 400,
+    proxy_url: Optional[str] = None,
 ) -> list[NoticeData]:
     """Pull Stark estate-opening cases filed in [start_date, end_date].
 
@@ -468,9 +469,17 @@ def scrape_stark_probate(
             against runaway walks when the portal is inconsistent. At ~30
             cases/day a 30-day window fits in ~900; the default 400 covers
             a typical weekly daily-pipeline pass with headroom.
+        proxy_url: Optional Apify residential-proxy URL. When set, installs a
+            urllib default opener for the duration of this call so all
+            _http_get calls route through the proxy.
     """
     if start_date > end_date:
         raise ValueError("start_date > end_date")
+
+    # Route urllib.request.urlopen() through the Apify residential proxy when
+    # configured. No-op if proxy_url is None (CLI / dev path).
+    from proxy_config import install_urllib_proxy
+    install_urllib_proxy(proxy_url)
 
     if hint_high is None:
         logger.info("stark probate: probing high watermark…")

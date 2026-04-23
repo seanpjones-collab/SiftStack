@@ -176,20 +176,27 @@ class CuyahogaCpDocketClient:
             )
     """
 
-    def __init__(self, *, headed: bool = False) -> None:
+    def __init__(self, *, headed: bool = False,
+                 proxy_url: Optional[str] = None) -> None:
         self.headed = headed
+        self.proxy_url = proxy_url
         self._pw = None
         self._browser = None
         self._context: Optional[BrowserContext] = None
         self._page: Optional[Page] = None
 
     async def __aenter__(self) -> "CuyahogaCpDocketClient":
+        from proxy_config import get_playwright_proxy
         self._pw = await async_playwright().start()
         self._browser = await self._pw.chromium.launch(headless=not self.headed)
-        self._context = await self._browser.new_context(
+        ctx_kwargs = dict(
             viewport={"width": 1400, "height": 900},
             user_agent=DEFAULT_USER_AGENT,
         )
+        proxy = get_playwright_proxy(self.proxy_url)
+        if proxy:
+            ctx_kwargs["proxy"] = proxy
+        self._context = await self._browser.new_context(**ctx_kwargs)
         self._page = await self._context.new_page()
         await self._pass_tos_gate()
         return self
@@ -228,19 +235,27 @@ class CuyahogaCpDocketClient:
         await page.wait_for_load_state("domcontentloaded")
         await page.wait_for_timeout(700)
 
-        if "TOS.aspx" not in (page.url or ""):
+        # The TOS gate is shown once per session. When running through a
+        # residential proxy, the outbound IP has often already accepted TOS
+        # for another tenant and cpdocket routes us straight to the
+        # foreclosure form on Search.aspx — no TOS.aspx in the chain. That's
+        # fine; treat it as "TOS already accepted" and continue.
+        current_url = page.url or ""
+        if "TOS.aspx" in current_url:
+            logger.info("cpdocket: accepting TOS click-through")
+            await page.click(TOS_YES_BUTTON)
+            await page.wait_for_load_state("domcontentloaded")
+            await page.wait_for_timeout(1_100)
+            if "Search.aspx" not in (page.url or ""):
+                raise CuyahogaCpDocketError(
+                    f"Unexpected page after TOS accept: {page.url}"
+                )
+        elif "Search.aspx" in current_url:
+            logger.info("cpdocket: TOS already accepted for this session "
+                        "(proxy IP reuse) — proceeding to foreclosure form")
+        else:
             raise CuyahogaCpDocketError(
-                f"Expected TOS gate after Foreclosure Search click, got {page.url}"
-            )
-
-        logger.info("cpdocket: accepting TOS click-through")
-        await page.click(TOS_YES_BUTTON)
-        await page.wait_for_load_state("domcontentloaded")
-        await page.wait_for_timeout(1_100)
-
-        if "Search.aspx" not in (page.url or ""):
-            raise CuyahogaCpDocketError(
-                f"Unexpected page after TOS accept: {page.url}"
+                f"Unexpected page after Foreclosure Search click: {current_url}"
             )
 
     async def _reset_to_search_form(self) -> None:
@@ -284,14 +299,37 @@ class CuyahogaCpDocketClient:
         await page.click(FORECLOSURE_RADIO)
         await page.wait_for_timeout(FORM_SETTLE_DELAY_MS)
 
+        # Wait for the date inputs to actually exist in the DOM before we
+        # try to evaluate against them. Under proxy latency the ASP.NET
+        # AJAX postback revealing these fields can take longer than
+        # FORM_SETTLE_DELAY_MS — without this wait, page.evaluate's setVal
+        # receives a null element and throws "Illegal invocation".
+        try:
+            await page.wait_for_selector(
+                f"#{FROM_DATE_ID}", state="visible", timeout=15_000,
+            )
+            await page.wait_for_selector(
+                f"#{TO_DATE_ID}", state="visible", timeout=15_000,
+            )
+        except Exception as exc:
+            raise CuyahogaCpDocketError(
+                f"cpdocket: date inputs did not render after radio click "
+                f"(FORM_SETTLE_DELAY_MS={FORM_SETTLE_DELAY_MS}): {exc}"
+            ) from exc
+
         # JS-set the masked dates (page.fill / keyboard.type both break here —
-        # MaskedEditBehavior reshuffles cursor position mid-entry).
+        # MaskedEditBehavior reshuffles cursor position mid-entry). setVal
+        # is null-safe because the proxy path can occasionally miss even
+        # after wait_for_selector if the element was briefly re-rendered.
         from_str = start_date.strftime("%m/%d/%Y")
         to_str = end_date.strftime("%m/%d/%Y")
         await page.evaluate(
             """([fromId, toId, fromStr, toStr]) => {
                 const setVal = (id, v) => {
                     const el = document.getElementById(id);
+                    if (!el) {
+                        throw new Error(`cpdocket setVal: #${id} not found`);
+                    }
                     const setter = Object.getOwnPropertyDescriptor(
                         window.HTMLInputElement.prototype, 'value'
                     ).set;
@@ -558,6 +596,7 @@ async def scrape_cuyahoga_cpdocket_foreclosures(
     filing_types: tuple[tuple[str, str, str], ...] = FORECLOSURE_FILING_TYPES,
     include_unclassified: bool = False,
     headed: bool = False,
+    proxy_url: Optional[str] = None,
 ) -> list[NoticeData]:
     """Scrape Cuyahoga Common Pleas foreclosure filings.
 
@@ -576,7 +615,7 @@ async def scrape_cuyahoga_cpdocket_foreclosures(
     results_by_case: dict[str, NoticeData] = {}
     stats = {"emitted": 0, "commercial": 0, "procedural_only": 0, "no_case": 0}
 
-    async with CuyahogaCpDocketClient(headed=headed) as client:
+    async with CuyahogaCpDocketClient(headed=headed, proxy_url=proxy_url) as client:
         for i, (ft, notice_type, subtype) in enumerate(filing_types):
             if i > 0:
                 await asyncio.sleep(BETWEEN_SEARCH_DELAY_SECONDS)

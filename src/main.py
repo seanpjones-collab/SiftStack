@@ -12,6 +12,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import config
 from config import (
@@ -22,6 +23,7 @@ from config import (
     SavedSearch,
 )
 from data_formatter import deduplicate, write_csv, write_csv_by_type
+from notice_parser import NoticeData
 # TN (tnpublicnotice.com) scraper disabled 2026-04-22 — out of scope for the
 # current OH-focused operation. Re-enable by restoring SAVED_SEARCHES in
 # config.py and uncommenting this import.
@@ -141,12 +143,20 @@ def _preflight_check(mode: str) -> list[str]:
 
 
 async def actor_main() -> None:
-    """Run as an Apify Actor — full automated pipeline.
+    """Run as an Apify Actor — full automated Ohio pipeline.
 
-    Scrape → Enrich → Tracerfy → DataSift Upload → Slack Notification.
+    Scrape (OH dispatcher) → Enrich → Tracerfy → PDFs → DataSift CSV export
+    → Slack Notification. Every HTTP call routes through the Apify residential
+    proxy so no civil-authority portal sees a repeat home IP.
+
+    KVS state persisted across runs:
+      - last_run_date                    — daily-mode since-date fallback
+      - stark_probate_watermark          — skips 15-GET binary search
+      - seen_case_numbers                — per-(county, notice_type) dedup
     """
     from apify import Actor
     from time import time as _time
+    import re as _re
 
     # Set up Python logging so all modules output at INFO level
     logging.basicConfig(
@@ -159,12 +169,10 @@ async def actor_main() -> None:
         actor_input = await Actor.get_input() or {}
 
         # Override config credentials from Actor input.
-        # Set both config.* AND os.environ so downstream modules that read
-        # from either source (e.g., datasift_uploader uses os.environ) pick them up.
+        # IMPORTANT: only override when actor_input actually supplies a value.
+        # Blank-string overrides would clobber values already loaded from .env
+        # via config.load_dotenv(), which happens at module import time.
         _cred_map = {
-            "TNPN_EMAIL": actor_input.get("tn_username", ""),
-            "TNPN_PASSWORD": actor_input.get("tn_password", ""),
-            "CAPTCHA_API_KEY": actor_input.get("captcha_api_key", ""),
             "ANTHROPIC_API_KEY": actor_input.get("anthropic_api_key", ""),
             "SMARTY_AUTH_ID": actor_input.get("smarty_auth_id", ""),
             "SMARTY_AUTH_TOKEN": actor_input.get("smarty_auth_token", ""),
@@ -176,17 +184,18 @@ async def actor_main() -> None:
             "DATASIFT_PASSWORD": actor_input.get("datasift_password", ""),
             "SLACK_WEBHOOK_URL": actor_input.get("slack_webhook_url", ""),
             "TRESTLE_API_KEY": actor_input.get("trestle_api_key", ""),
+            "ALN_EMAIL": actor_input.get("aln_email", ""),
+            "ALN_PASSWORD": actor_input.get("aln_password", ""),
         }
         for key, val in _cred_map.items():
-            setattr(config, key, val)
             if val:
+                setattr(config, key, val)
                 os.environ[key] = val
 
         mode = actor_input.get("mode", "daily")
         counties = actor_input.get("counties") or None
         types = actor_input.get("types") or None
-        since_date_override = actor_input.get("since_date", "").strip()
-        start_page = int(actor_input.get("start_page", 1) or 1)
+        since_date_override = (actor_input.get("since_date") or "").strip()
         drive_folder_id = actor_input.get("google_drive_folder_id", "")
         drive_key_b64 = actor_input.get("google_service_account_key", "")
 
@@ -199,65 +208,254 @@ async def actor_main() -> None:
         include_commercial = actor_input.get("include_commercial", False)
         include_entities = actor_input.get("include_entities", False)
 
-        # Validate
-        if not config.TNPN_EMAIL or not config.TNPN_PASSWORD:
-            Actor.log.error("tn_username and tn_password are required")
-            try:
-                from slack_notifier import notify_preflight_failure
-                notify_preflight_failure(["TNPN credentials missing"])
-            except Exception:
-                pass
-            await Actor.fail(status_message="Missing SiftStack credentials")
-            return
-        if not config.CAPTCHA_API_KEY:
-            Actor.log.warning("captcha_api_key not set — CAPTCHA solving will fail")
-
-        # Filter searches
-        searches = _filter_searches(counties, types)
-        if not searches:
-            Actor.log.error("No saved searches match the given counties/types filters")
-            await Actor.fail(status_message="No matching saved searches")
-            return
-
-        Actor.log.info(
-            "Running %d saved searches: %s",
-            len(searches),
-            ", ".join(s.saved_search_name for s in searches),
-        )
-
-        # Set up residential proxy if requested
-        proxy_url: str | None = None
+        # ── Residential proxy ──────────────────────────────────────────
+        # Every HTTP call from every scraper routes through this when it
+        # works. The goal is zero residential-IP fingerprint against civil-
+        # authority portals.
+        #
+        # Resolution order:
+        #   1. actor_input["apify_proxy_url"] — explicit per-run override
+        #   2. APIFY_PROXY_URL env var (from .env, if present) — persistent dev override
+        #   3. Actor.create_proxy_configuration(groups=["RESIDENTIAL"]) — SDK path
+        #
+        # Local `apify run` WITH any of the direct URLs still hits Apify's
+        # "Proxy external access" gate at the proxy server (403 Forbidden on
+        # the tunnel). That gate is a paid-plan feature — email support to
+        # enable. On the Apify platform itself (after `apify push`), the SDK
+        # path works without the gate. If proxy config fails by any path,
+        # we EXPLICITLY clear APIFY_PROXY_URL from os.environ so scrapers
+        # don't implicitly route through a broken proxy via the env fallback.
+        proxy_url: Optional[str] = None
         use_proxy = actor_input.get("use_residential_proxy", True)
-        if use_proxy:
+        env_url = (os.environ.get("APIFY_PROXY_URL") or "").strip()
+        direct_override = (actor_input.get("apify_proxy_url") or "").strip() or env_url
+
+        if use_proxy and direct_override:
+            proxy_url = direct_override
+            Actor.log.info("Proxy: using explicit URL override (apify_proxy_url "
+                           "input or APIFY_PROXY_URL env var)")
+        elif use_proxy:
             try:
-                proxy_config = await Actor.create_proxy_configuration(
-                    groups=["RESIDENTIAL"]
+                # Constrain to US-only residential IPs. Ohio courts (and many
+                # US civil-authority portals) geo-block or WAF-filter foreign
+                # residential traffic — observed during initial cloud test
+                # when Italy-pool IP timed out cpdocket Playwright navigation.
+                proxy_cfg = await Actor.create_proxy_configuration(
+                    groups=["RESIDENTIAL"],
+                    country_code="US",
                 )
-                proxy_url = await proxy_config.new_url()
-                Actor.log.info("Residential proxy configured")
+                if proxy_cfg is not None:
+                    proxy_url = await proxy_cfg.new_url()
+                if not proxy_url:
+                    Actor.log.warning("Proxy: create_proxy_configuration returned None")
+            except Exception as exc:
+                Actor.log.warning(
+                    "Proxy: create_proxy_configuration failed: %s. Scrapers "
+                    "will run direct unless you paste the URL into "
+                    "apify_proxy_url or set APIFY_PROXY_URL in .env.", exc,
+                )
+
+        # Verify the proxy actually works before committing scrapers to it.
+        # Local `apify run` often fails the "Proxy external access" gate
+        # and returns 403 on the tunnel even with a valid URL.
+        proxy_verified = False
+        if proxy_url:
+            from proxy_config import get_requests_proxies, install_urllib_proxy
+            try:
+                import requests as _req
+                _resp = _req.get(
+                    "https://httpbin.org/ip",
+                    proxies=get_requests_proxies(proxy_url),
+                    timeout=20,
+                    headers={"User-Agent": "SiftStack/proxy-verify"},
+                )
+                if _resp.status_code == 200:
+                    _observed_ip = _resp.json().get("origin", "?")
+                    Actor.log.info(
+                        "PROXY RECEIPT: outbound IP observed via "
+                        "httpbin.org/ip = %s (proxy verified)", _observed_ip,
+                    )
+                    proxy_verified = True
+                else:
+                    Actor.log.warning(
+                        "PROXY RECEIPT: verification HTTP %s — proxy will NOT "
+                        "be used this run", _resp.status_code,
+                    )
+            except Exception as _exc:
+                Actor.log.warning(
+                    "PROXY RECEIPT: verification failed (%s) — proxy will NOT "
+                    "be used this run. Likely causes: (a) 'Proxy external "
+                    "access' not enabled on Apify account (email "
+                    "support@apify.com), or (b) network/firewall blocking "
+                    "proxy.apify.com:8000. To test the proxy, `apify push` "
+                    "and run the Actor on the platform.", _exc,
+                )
+
+        if proxy_verified:
+            os.environ["APIFY_PROXY_URL"] = proxy_url
+            install_urllib_proxy(proxy_url)
+            Actor.log.info("Scraper traffic will route through Apify "
+                           "RESIDENTIAL proxy group")
+        else:
+            # Critical: clear any env-leaked URL so scrapers don't pick it up
+            # via proxy_config.resolve_proxy_url()'s env fallback. Otherwise
+            # every urllib call 403s on the tunnel and every scraper crashes.
+            os.environ.pop("APIFY_PROXY_URL", None)
+            proxy_url = None
+            Actor.log.warning(
+                "Proxy UNAVAILABLE this run — scraper traffic will go direct "
+                "from this machine's IP. For production, `apify push` and "
+                "run on Apify (platform-native proxy works without the "
+                "external-access gate)."
+            )
+
+        if config.ANTHROPIC_API_KEY:
+            Actor.log.info("LLM fallback enabled (Claude Haiku) for missing fields")
+        else:
+            Actor.log.info("LLM fallback disabled — set anthropic_api_key to enable")
+
+        try:
+            kvs = await Actor.open_key_value_store()
+            try:
+                kvs_id = kvs._id if hasattr(kvs, "_id") else ""
             except Exception:
-                Actor.log.warning("Could not configure residential proxy — running without proxy")
+                kvs_id = ""
 
-        # Track seen notice IDs for incremental dedup
-        seen_ids: set[str] = set()
+            # stark_probate's binary-search high-watermark probe is ~15 GETs.
+            # Cache it so daily runs start one above yesterday's high and
+            # walk down — eliminates the warm-up cost.
+            stark_probate_watermark = await kvs.get_value("stark_probate_watermark")
+            if stark_probate_watermark:
+                Actor.log.info("Stark probate: using cached watermark = %d",
+                               stark_probate_watermark)
 
-        def _notice_id(url: str) -> str:
-            import re
-            m = re.search(r"[?&]ID=(\d+)", url)
-            return m.group(1) if m else ""
+            # Cross-run dedup: per-(county, notice_type) sets of seen case_nos.
+            # Keyed as "seen_case_numbers:<county>:<notice_type>" so a Cuyahoga
+            # foreclosure case can't collide with a Summit probate case.
+            seen_case_numbers: dict[str, set[str]] = {}
+            _stored_seen = await kvs.get_value("seen_case_numbers") or {}
+            for k, v in _stored_seen.items():
+                seen_case_numbers[k] = set(v) if isinstance(v, list) else set(v)
+            Actor.log.info(
+                "Loaded %d cross-run dedup buckets from KVS",
+                len(seen_case_numbers),
+            )
 
-        async def push_batch(batch_notices):
-            """Push new unique notices to dataset immediately after each search."""
-            unique = []
-            for n in batch_notices:
-                nid = _notice_id(n.source_url)
-                if nid and nid in seen_ids:
-                    continue
-                if nid:
-                    seen_ids.add(nid)
-                unique.append(n)
-            if unique:
-                await Actor.push_data([
+            # ── Per-scraper catch-up windows ────────────────────────────
+            # Each of the 6 (county, notice_type) scrapers tracks its own
+            # last_successful_scrape_date in KVS under
+            # "last_successful:{county}:{notice_type}". Today's run for each
+            # scraper covers [last_successful + 1, yesterday].
+            # If a scraper has no history → fallback to
+            # [yesterday - OH_DAILY_LOOKBACK_DAYS + 1, yesterday] (bootstrap).
+            # `historical` and `since_date` modes bypass per-scraper logic and
+            # use a single wide window for all scrapers.
+            from datetime import date as _date, datetime as _datetime, timedelta as _td
+
+            today = _date.today()
+            yesterday = today - _td(days=1)
+
+            # Compute per-scraper windows. In historical/since-date override
+            # mode, we reuse the fallback resolve_ohio_window() for a shared
+            # window and don't gate on per-scraper KVS state.
+            per_scraper_windows: dict[tuple[str, str], tuple] = {}
+            fallback_start: Optional[_date] = None
+            fallback_end: Optional[_date] = None
+
+            if mode == "daily" and not since_date_override:
+                OH_COUNTIES_LOWER = [c.lower() for c in ("Cuyahoga", "Summit", "Stark")]
+                for _county in OH_COUNTIES_LOWER:
+                    for _ntype in ("foreclosure", "probate"):
+                        kvs_key = f"last_successful_{_county}_{_ntype}"
+                        raw = await kvs.get_value(kvs_key)
+                        if raw:
+                            try:
+                                last_ok = _datetime.strptime(
+                                    str(raw), "%Y-%m-%d"
+                                ).date()
+                                start = last_ok + _td(days=1)
+                            except Exception:
+                                Actor.log.warning(
+                                    "KVS %s malformed (%r) — treating as no history",
+                                    kvs_key, raw,
+                                )
+                                start = yesterday - _td(
+                                    days=config.OH_DAILY_LOOKBACK_DAYS - 1
+                                )
+                        else:
+                            start = yesterday - _td(
+                                days=config.OH_DAILY_LOOKBACK_DAYS - 1
+                            )
+                        per_scraper_windows[(_county, _ntype)] = (start, yesterday)
+                Actor.log.info(
+                    "Daily mode: per-scraper catch-up windows computed "
+                    "(today=%s, yesterday=%s)",
+                    today.isoformat(), yesterday.isoformat(),
+                )
+                for (c, t), (s, e) in sorted(per_scraper_windows.items()):
+                    gap = (e - s).days + 1 if s <= e else 0
+                    Actor.log.info(
+                        "  %s %s: %s → %s (%d day%s)",
+                        c, t, s.isoformat(), e.isoformat(),
+                        gap, "" if gap == 1 else "s",
+                    )
+            else:
+                # historical or explicit since_date: one shared window, scrape
+                # everything regardless of per-scraper KVS state
+                try:
+                    fallback_start, fallback_end = resolve_ohio_window(
+                        mode=mode,
+                        since_date=since_date_override or None,
+                    )
+                except ValueError as exc:
+                    Actor.log.error("Invalid since_date: %s", exc)
+                    await Actor.fail(status_message=str(exc))
+                    return
+                Actor.log.info(
+                    "Shared window: %s → %s  (mode=%s, since_date=%r)",
+                    fallback_start.isoformat(), fallback_end.isoformat(),
+                    mode, since_date_override or "",
+                )
+
+            # ── Incremental push-to-dataset callback ────────────────
+            pushed_count = 0
+
+            def _case_key(notice: NoticeData) -> str:
+                """Extract a stable per-scraper dedup key."""
+                # source_url generally contains ?case_no=... or caseNum=... or
+                # /search/detail/{id}. Fall back to raw_text[0:200] hash.
+                url = notice.source_url or ""
+                m = _re.search(r"(?:case_no|caseNum|CaseNo)=([\w\-]+)", url)
+                if m:
+                    return m.group(1)
+                m = _re.search(r"/search/detail/(\d+)", url)
+                if m:
+                    return f"aln:{m.group(1)}"
+                # DLN rows have [DLN#id] in raw_text
+                m = _re.search(r"\[DLN#(\d+)\]", notice.raw_text or "")
+                if m:
+                    return f"dln:{m.group(1)}"
+                return ""
+
+            def on_batch_sync(batch_notices: list, label: str) -> None:
+                """Called by oh_dispatcher after each (county, notice_type)."""
+                nonlocal pushed_count
+                # label is "Cuyahoga foreclosure" etc. Normalize to key.
+                parts = label.lower().split()
+                bucket_key = ":".join(parts[:2]) if len(parts) >= 2 else label
+                seen = seen_case_numbers.setdefault(bucket_key, set())
+                fresh = []
+                for n in batch_notices:
+                    k = _case_key(n)
+                    if k and k in seen:
+                        continue
+                    if k:
+                        seen.add(k)
+                    fresh.append(n)
+                if not fresh:
+                    Actor.log.info("Dataset push [%s]: 0 new (all seen)", label)
+                    return
+                payload = [
                     {
                         "date_added": n.date_added,
                         "address": n.address,
@@ -273,90 +471,120 @@ async def actor_main() -> None:
                         "owner_state": n.owner_state,
                         "owner_zip": n.owner_zip,
                         "auction_date": n.auction_date,
-                        "zip_plus4": n.zip_plus4,
-                        "latitude": n.latitude,
-                        "longitude": n.longitude,
-                        "dpv_match_code": n.dpv_match_code,
-                        "vacant": n.vacant,
-                        "rdi": n.rdi,
-                        "mls_status": n.mls_status,
-                        "mls_listing_price": n.mls_listing_price,
-                        "mls_last_sold_date": n.mls_last_sold_date,
-                        "mls_last_sold_price": n.mls_last_sold_price,
-                        "estimated_value": n.estimated_value,
-                        "estimated_equity": n.estimated_equity,
-                        "equity_percent": n.equity_percent,
-                        "property_type": n.property_type,
-                        "bedrooms": n.bedrooms,
-                        "bathrooms": n.bathrooms,
-                        "sqft": n.sqft,
-                        "year_built": n.year_built,
-                        "lot_size": n.lot_size,
                         "source_url": n.source_url,
-                        "raw_text": n.raw_text[:5000] if n.raw_text else "",
+                        "parcel_id": n.parcel_id,
+                        "raw_text": (n.raw_text or "")[:5000],
                     }
-                    for n in unique
-                ])
-                Actor.log.info("Pushed %d records to dataset (incremental)", len(unique))
+                    for n in fresh
+                ]
+                # on_batch is always invoked from the main event-loop thread
+                # (right after `await fn(...)` returns — sync scrapers wrapped
+                # in asyncio.to_thread still hand control back to the loop).
+                # Fire-and-forget via ensure_future so we don't deadlock on the
+                # loop waiting for our own coroutine. Log failures via
+                # add_done_callback rather than blocking.
+                def _log_push_result(fut: asyncio.Future, _lbl: str = label,
+                                     _n: int = len(fresh)) -> None:
+                    try:
+                        fut.result()
+                    except Exception as exc:
+                        Actor.log.warning("Dataset push [%s] failed: %s",
+                                          _lbl, exc)
+                task = asyncio.ensure_future(Actor.push_data(payload))
+                task.add_done_callback(_log_push_result)
+                pushed_count += len(fresh)
+                Actor.log.info("Dataset push [%s]: +%d scheduled (cumulative %d)",
+                               label, len(fresh), pushed_count)
 
-        # Log LLM parser status
-        if config.ANTHROPIC_API_KEY:
-            Actor.log.info("LLM fallback enabled (Claude Haiku) for missing fields")
-        else:
-            Actor.log.info("LLM fallback disabled — set anthropic_api_key to enable")
+            # ── Scrape via the OH dispatcher ────────────────────────
+            extra = {}
+            if stark_probate_watermark:
+                extra["stark_probate_watermark"] = stark_probate_watermark
 
-        if start_page > 1:
-            Actor.log.info("Starting from page %d (skipping earlier pages)", start_page)
-
-        try:
-            kvs = await Actor.open_key_value_store()
-
-            # ── Load last_run_date from Apify KVS (persists between runs) ──
-            if mode == "daily" and not since_date_override:
-                stored = await kvs.get_value("last_run_date")
-                if stored:
-                    since_date_override = stored
-                    Actor.log.info("Daily mode: using stored last_run_date = %s", stored)
-                else:
-                    Actor.log.info("Daily mode: no stored last_run_date, defaulting to 7 days")
-
-            # ── Load cross-run seen-ID cache from KVS (makes daily re-runs idempotent) ──
-            seen_ids = await kvs.get_value("seen_notice_ids") or {}
-            Actor.log.info("Loaded %d previously-seen notice IDs from KVS", len(seen_ids))
-
-            async def persist_seen_ids(ids: dict) -> None:
-                """Mid-run persistence — if a later search crashes, progress is kept."""
-                try:
-                    await kvs.set_value("seen_notice_ids", ids)
-                    await kvs.set_value(
-                        "last_run_date",
-                        datetime.now().strftime("%Y-%m-%d"),
-                    )
-                except Exception as e:
-                    Actor.log.warning("Failed to persist seen_notice_ids to KVS: %s", e)
-
-            # ── Scrape ────────────────────────────────────────────────
-            # Apify Actor branch still references the (now-disabled) TN
-            # scrape_all flow. Fail loud rather than silently run empty —
-            # the OH dispatcher needs its own Apify wiring (date-window
-            # resolution, per-county KVS state, incremental push_batch)
-            # before this branch can be turned back on.
-            raise RuntimeError(
-                "Apify Actor mode is not wired for the Ohio dispatcher yet. "
-                "Run from the CLI (python src/main.py daily) until "
-                "actor_main() is ported. See oh_dispatcher.scrape_ohio_all."
+            dispatch_result = await scrape_ohio_all(
+                start_date=fallback_start,
+                end_date=fallback_end,
+                per_scraper_windows=per_scraper_windows or None,
+                counties=counties,
+                types=types,
+                on_batch=on_batch_sync,
+                proxy_url=proxy_url,
+                extra=extra,
             )
-            # Handle async probate lookup before pipeline (requires await)
-            probate_notices = [n for n in notices if n.notice_type == "probate" and n.decedent_name and not n.address]
-            if probate_notices:
+            notices = dispatch_result["records"]
+            scraper_success = dispatch_result["success"]
+            scraper_end_dates = dispatch_result["end_dates"]
+            scraper_skipped = dispatch_result["skipped"]
+            Actor.log.info("OH dispatcher returned %d notices total", len(notices))
+
+            # Update stark probate high watermark from returned notices
+            # (source_url pattern: case_info.asp?case_no=NNNNNN).
+            new_high = stark_probate_watermark or 0
+            for n in notices:
+                if n.county != "Stark" or n.notice_type != "probate":
+                    continue
+                m = _re.search(r"case_no=(\d+)", n.source_url or "")
+                if not m:
+                    continue
+                try:
+                    cn = int(m.group(1))
+                except ValueError:
+                    continue
+                if cn > new_high:
+                    new_high = cn
+            if new_high and new_high != stark_probate_watermark:
+                # Leave a little buffer so tomorrow's walk starts above today's
+                # last-known high and catches any newly-allocated numbers.
+                stark_probate_watermark = new_high + 20
+
+            if not notices:
+                Actor.log.warning("No notices found")
+                # Still persist KVS so tomorrow's run has a fresh last_run_date
+                await kvs.set_value("last_run_date",
+                                    datetime.now().strftime("%Y-%m-%d"))
+                if do_notify_slack and config.SLACK_WEBHOOK_URL:
+                    try:
+                        from slack_notifier import send_slack_notification
+                        send_slack_notification([])
+                    except Exception:
+                        Actor.log.warning("Slack notification for empty run failed",
+                                          exc_info=True)
+                return
+
+            total = len(notices)
+
+            # ── Handle async probate property lookup (TN only) ──────
+            # property_lookup is currently Knox/Blount-only (KGIS/TPAD).
+            # OH probates flow through enrichment with empty address until
+            # lookup_ohio_decedent_properties ships.
+            tn_probate_notices = [
+                n for n in notices
+                if n.notice_type == "probate" and n.decedent_name
+                and not n.address and n.state == "TN"
+            ]
+            if tn_probate_notices:
                 try:
                     from property_lookup import lookup_decedent_properties
-                    Actor.log.info("Looking up property addresses for %d probate notices...", len(probate_notices))
-                    await lookup_decedent_properties(probate_notices)
+                    Actor.log.info(
+                        "Looking up property addresses for %d TN probate notices...",
+                        len(tn_probate_notices),
+                    )
+                    await lookup_decedent_properties(tn_probate_notices)
                 except ImportError:
-                    Actor.log.warning("property_lookup module not found -- skipping property lookup")
-                except Exception as e:
-                    Actor.log.warning("Property lookup failed: %s -- continuing without lookups", e)
+                    Actor.log.warning("property_lookup module not found — skipping")
+                except Exception as exc:
+                    Actor.log.warning("Property lookup failed: %s — continuing", exc)
+
+            oh_probates_missing = sum(
+                1 for n in notices
+                if n.notice_type == "probate" and n.state == "OH" and not n.address
+            )
+            if oh_probates_missing:
+                Actor.log.info(
+                    "OH probate: %d records missing property address "
+                    "(pending lookup_ohio_decedent_properties)",
+                    oh_probates_missing,
+                )
 
             # ── Enrichment ────────────────────────────────────────────
             from enrichment_pipeline import PipelineOptions, run_enrichment_pipeline
@@ -505,11 +733,15 @@ async def actor_main() -> None:
             # ── Slack Notification ────────────────────────────────────
             elapsed_min = (_time() - pipeline_start) / 60
 
-            # Compute estimated run cost
+            # Compute estimated run cost. 2Captcha was TN-only (reCAPTCHA on
+            # every tnpublicnotice.com notice page); OH portals don't use it.
             cost_breakdown = {}
-            # 2Captcha: $0.003 per solve, ~1 solve per notice scraped
-            captcha_count = total  # each notice detail page requires a CAPTCHA
-            cost_breakdown["2Captcha"] = round(captcha_count * 0.003, 2)
+            # Apify residential proxy: ~$8/GB; rough estimate of 50KB/notice
+            # (page + JSON + redirects). Conservative — actual usage is logged
+            # on the Apify dashboard.
+            if proxy_url:
+                est_gb = (total * 0.05) / 1024  # 50KB per notice → MB → GB
+                cost_breakdown["Apify Proxy (est)"] = round(est_gb * 8.0, 2)
             # Anthropic Haiku: ~$0.001 per record (LLM parsing + obituary search)
             if config.ANTHROPIC_API_KEY:
                 cost_breakdown["Anthropic (Haiku)"] = round(total * 0.001, 3)
@@ -562,12 +794,54 @@ async def actor_main() -> None:
                 except Exception as e:
                     Actor.log.warning("Slack notification failed: %s", e)
 
-            # ── Save last_run_date + seen_notice_ids to Apify KVS for next run ─────
+            # ── Save KVS state for next daily run ─────────────────────
+            # Per-scraper last_successful_scrape_date: advance ONLY for
+            # scrapers that succeeded this run (dispatcher marked them in
+            # scraper_success). Failed scrapers keep their previous value —
+            # tomorrow's window will re-cover today.
             await kvs.set_value("last_run_date", datetime.now().strftime("%Y-%m-%d"))
-            await kvs.set_value("seen_notice_ids", seen_ids)
+            if stark_probate_watermark:
+                await kvs.set_value("stark_probate_watermark",
+                                    int(stark_probate_watermark))
+
+            advanced: list[str] = []
+            held: list[str] = []
+            for (county, ntype), ok in scraper_success.items():
+                kvs_key = f"last_successful_{county}_{ntype}"
+                if ok and (county, ntype) in scraper_end_dates:
+                    new_date = scraper_end_dates[(county, ntype)].isoformat()
+                    await kvs.set_value(kvs_key, new_date)
+                    advanced.append(f"{county}/{ntype}={new_date}")
+                else:
+                    held.append(f"{county}/{ntype}")
+            # Caught-up scrapers (skipped because window was backwards) also
+            # advance — they're "up to date" by definition.
+            for county, ntype in scraper_skipped:
+                if (county, ntype) in scraper_end_dates:
+                    kvs_key = f"last_successful_{county}_{ntype}"
+                    new_date = scraper_end_dates[(county, ntype)].isoformat()
+                    await kvs.set_value(kvs_key, new_date)
+                    advanced.append(f"{county}/{ntype}={new_date}")
             Actor.log.info(
-                "Saved last_run_date + %d seen_notice_ids to KVS for next daily run",
-                len(seen_ids),
+                "KVS last_successful advanced: %s | held (will re-run): %s",
+                ", ".join(advanced) or "(none)",
+                ", ".join(held) or "(none)",
+            )
+
+            # Sets aren't JSON-serializable — convert to sorted lists. Cap each
+            # bucket at 10k entries so KVS values stay under 1MB per-key limit.
+            _BUCKET_CAP = 10_000
+            serializable_seen = {
+                k: sorted(v)[-_BUCKET_CAP:]
+                for k, v in seen_case_numbers.items()
+            }
+            await kvs.set_value("seen_case_numbers", serializable_seen)
+            Actor.log.info(
+                "Saved KVS: last_run_date, stark_probate_watermark=%s, "
+                "seen_case_numbers (%d buckets, %d total case_nos)",
+                stark_probate_watermark,
+                len(serializable_seen),
+                sum(len(v) for v in serializable_seen.values()),
             )
 
             Actor.log.info("Done — %d notices exported (%.1f min)", total, elapsed_min)
@@ -1037,6 +1311,8 @@ def cli_main() -> None:
             "comp", "rehab", "analyze-deal", "market-analysis", "buyer-prospect",
             "deep-prospect", "lead-manage", "setup-sequences", "niche-sequential",
             "playbook",
+            # Ops / diagnostics
+            "verify-proxy",
         ],
         help=(
             "daily/historical = scrape notices; pdf-import/photo-import = import from files; "
@@ -1082,6 +1358,14 @@ def cli_main() -> None:
         "--verbose", "-v",
         action="store_true",
         help="Enable debug logging",
+    )
+    parser.add_argument(
+        "--proxy-url",
+        type=str,
+        default=None,
+        help="Proxy URL override (http://user:pass@host:port). For verify-proxy "
+             "mode, or to force a proxy in CLI scrape modes. Normally unset in "
+             "CLI — only the Apify Actor sets APIFY_PROXY_URL automatically.",
     )
 
     # PDF import arguments
@@ -1483,6 +1767,18 @@ def cli_main() -> None:
         sys.exit(1)
     logging.info("Preflight checks passed")
 
+    # ── Ops / diagnostics ─────────────────────────────────────────────
+
+    if args.mode == "verify-proxy":
+        # Prove that each of Playwright / requests / urllib routes traffic
+        # through whatever proxy_config.resolve_proxy_url() picks up. Reads
+        # APIFY_PROXY_URL from env by default, or accepts an override via
+        # --proxy-url. Output is the observed outbound IP from each mechanism;
+        # with proxy configured, all three should match an Apify residential IP,
+        # NOT the local/home IP.
+        asyncio.run(_verify_proxy(args))
+        return
+
     # ── New analysis & workflow modes ─────────────────────────────────
 
     if args.mode == "comp":
@@ -1585,7 +1881,6 @@ def cli_main() -> None:
         if not csv_path:
             print("ERROR: --csv-path required or place CSVs in output/")
             return
-        import asyncio
         from deep_prospector import run_deep_prospecting
         result = asyncio.run(run_deep_prospecting(
             csv_path=csv_path, depth=args.depth,
@@ -1724,32 +2019,151 @@ def cli_main() -> None:
         sys.exit(1)
 
 
-def _resolve_ohio_date_window(args) -> tuple:
-    """Map CLI args to (start_date, end_date) for the OH dispatcher.
+def resolve_ohio_window(
+    *, mode: str, since_date: str | None = None,
+) -> tuple:
+    """Map (mode, since_date) to (start_date, end_date) for the OH dispatcher.
 
     Precedence:
-      1. Explicit `--since YYYY-MM-DD` → [since, today]
-      2. `daily` mode → [today - OH_DAILY_LOOKBACK_DAYS + 1, today]
-      3. `historical` mode → [today - OH_HISTORICAL_LOOKBACK_DAYS + 1, today]
+      1. `since_date` (YYYY-MM-DD)  → [since, today]
+      2. mode == "historical"        → [today - OH_HISTORICAL_LOOKBACK_DAYS + 1, today]
+      3. default ("daily")           → [today - OH_DAILY_LOOKBACK_DAYS + 1, today]
+
+    Raises ValueError on malformed since_date.
     """
     from datetime import date as _date, datetime as _datetime, timedelta as _td
 
     today = _date.today()
 
-    if args.since:
+    if since_date:
         try:
-            start = _datetime.strptime(args.since.strip(), "%Y-%m-%d").date()
+            start = _datetime.strptime(since_date.strip(), "%Y-%m-%d").date()
         except ValueError as exc:
-            raise SystemExit(
-                f"--since must be YYYY-MM-DD, got {args.since!r}: {exc}"
+            raise ValueError(
+                f"since_date must be YYYY-MM-DD, got {since_date!r}: {exc}"
             ) from exc
         return start, today
 
-    if args.mode == "historical":
+    if mode == "historical":
         return today - _td(days=config.OH_HISTORICAL_LOOKBACK_DAYS - 1), today
 
     # daily (default)
     return today - _td(days=config.OH_DAILY_LOOKBACK_DAYS - 1), today
+
+
+def _resolve_ohio_date_window(args) -> tuple:
+    """CLI adapter — re-exports resolve_ohio_window() with args-style calling."""
+    try:
+        return resolve_ohio_window(
+            mode=args.mode,
+            since_date=args.since if getattr(args, "since", None) else None,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+async def _verify_proxy(args) -> None:
+    """Hit httpbin.org/ip through Playwright, requests, and urllib.
+
+    Prints the observed outbound IP from each HTTP mechanism. With a proxy
+    configured, all three IPs should be from the Apify residential pool and
+    should NOT equal the user's home IP. Without a proxy, all three should
+    be identical (your local egress).
+
+    Reads proxy URL from --proxy-url (if given) or APIFY_PROXY_URL env var.
+    """
+    import json as _json
+    from urllib.parse import urlparse
+    import urllib.request
+
+    proxy_url = args.proxy_url or os.environ.get("APIFY_PROXY_URL", "").strip() or None
+    if proxy_url:
+        masked = urlparse(proxy_url)
+        host = masked.hostname or "?"
+        port = masked.port or "?"
+        user = masked.username or ""
+        print(f"verify-proxy: using proxy {masked.scheme}://{user}:***@{host}:{port}")
+    else:
+        print("verify-proxy: NO PROXY configured — this should show your home IP.")
+        print("              (Set APIFY_PROXY_URL or use --proxy-url to test routing.)")
+
+    TARGET = "https://httpbin.org/ip"
+    results: dict[str, str] = {}
+
+    # ── urllib (via install_urllib_proxy → default opener) ──
+    print("\n[1/3] urllib.request …")
+    from proxy_config import install_urllib_proxy
+    install_urllib_proxy(proxy_url)
+    try:
+        req = urllib.request.Request(
+            TARGET, headers={"User-Agent": "SiftStack-verify-proxy/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = _json.loads(resp.read().decode("utf-8"))
+        results["urllib"] = body.get("origin", "?")
+        print(f"      urllib IP: {results['urllib']}")
+    except Exception as exc:
+        results["urllib"] = f"ERROR: {exc}"
+        print(f"      urllib FAILED: {exc}")
+
+    # ── requests.Session (via proxies dict) ──
+    print("\n[2/3] requests.Session …")
+    try:
+        import requests as _req
+        from proxy_config import get_requests_proxies
+        s = _req.Session()
+        s.headers["User-Agent"] = "SiftStack-verify-proxy/1.0"
+        proxies = get_requests_proxies(proxy_url)
+        if proxies:
+            s.proxies = proxies
+        resp = s.get(TARGET, timeout=30)
+        results["requests"] = resp.json().get("origin", "?")
+        print(f"      requests IP: {results['requests']}")
+    except Exception as exc:
+        results["requests"] = f"ERROR: {exc}"
+        print(f"      requests FAILED: {exc}")
+
+    # ── Playwright (via browser context proxy) ──
+    print("\n[3/3] Playwright (Chromium) …")
+    try:
+        from playwright.async_api import async_playwright
+        from proxy_config import get_playwright_proxy
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=True)
+            ctx_kwargs: dict = {"user_agent": "SiftStack-verify-proxy/1.0"}
+            pw_proxy = get_playwright_proxy(proxy_url)
+            if pw_proxy:
+                ctx_kwargs["proxy"] = pw_proxy
+            context = await browser.new_context(**ctx_kwargs)
+            page = await context.new_page()
+            await page.goto(TARGET, wait_until="domcontentloaded", timeout=30_000)
+            body = await page.evaluate("() => document.body.innerText")
+            await browser.close()
+        parsed = _json.loads(body)
+        results["playwright"] = parsed.get("origin", "?")
+        print(f"      Playwright IP: {results['playwright']}")
+    except Exception as exc:
+        results["playwright"] = f"ERROR: {exc}"
+        print(f"      Playwright FAILED: {exc}")
+
+    # ── Summary ──
+    print("\n=== Summary ===")
+    for name, ip in results.items():
+        print(f"  {name:12s} {ip}")
+
+    # With proxy: all three should resolve to Apify residential IPs, NOT the
+    # local egress. Without proxy: all three should match each other (your
+    # home IP). Either way, divergence across the three is a bug.
+    non_error = {name: ip for name, ip in results.items()
+                 if not ip.startswith("ERROR")}
+    if proxy_url and len(non_error) == 3:
+        unique_ips = set(non_error.values())
+        if len(unique_ips) == 1:
+            print("\n  All three mechanisms routed through the same IP — good sign.")
+        else:
+            print("\n  WARNING: mechanisms reported different IPs. The residential "
+                  "pool rotates per-connection, so this can be legitimate — "
+                  "but double-check no mechanism is bypassing the proxy.")
 
 
 def _run_scrape_pipeline(args, counties, types) -> None:
@@ -1763,12 +2177,25 @@ def _run_scrape_pipeline(args, counties, types) -> None:
     start_date, end_date = _resolve_ohio_date_window(args)
     logging.info("OH scrape window: %s → %s", start_date, end_date)
 
-    notices = asyncio.run(scrape_ohio_all(
+    # Pick up an explicit --proxy-url or APIFY_PROXY_URL env var for CLI
+    # runs (normally None — CLI is direct-traffic by default, documented
+    # as dev-only). Apify Actor mode goes through actor_main() instead.
+    from proxy_config import resolve_proxy_url
+    proxy_url = resolve_proxy_url(getattr(args, "proxy_url", None))
+    if proxy_url:
+        logging.info("CLI scrape: routing through proxy")
+
+    dispatch_result = asyncio.run(scrape_ohio_all(
         start_date=start_date,
         end_date=end_date,
         counties=counties,
         types=types,
+        proxy_url=proxy_url,
     ))
+    # CLI path: shared window across all scrapers (no per-scraper KVS state).
+    # Unwrap the new dict return shape into the legacy `notices` variable
+    # that the rest of this function expects.
+    notices = dispatch_result["records"]
     # Handle async probate property lookup before enrichment.
     # property_lookup.py is Knox (KGIS) + Blount (TPAD) specific — it will
     # return nothing for OH decedents until we land the Cuyahoga / Summit /

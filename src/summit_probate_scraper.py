@@ -123,20 +123,27 @@ class SummitProbateClient:
                 detail = await client.fetch_case_detail(row["detail_href"])
     """
 
-    def __init__(self, *, headed: bool = False) -> None:
+    def __init__(self, *, headed: bool = False,
+                 proxy_url: Optional[str] = None) -> None:
         self.headed = headed
+        self.proxy_url = proxy_url
         self._pw = None
         self._browser = None
         self._context: Optional[BrowserContext] = None
         self._page: Optional[Page] = None
 
     async def __aenter__(self) -> "SummitProbateClient":
+        from proxy_config import get_playwright_proxy
         self._pw = await async_playwright().start()
         self._browser = await self._pw.chromium.launch(headless=not self.headed)
-        self._context = await self._browser.new_context(
+        ctx_kwargs = dict(
             viewport={"width": 1400, "height": 900},
             user_agent=DEFAULT_USER_AGENT,
         )
+        proxy = get_playwright_proxy(self.proxy_url)
+        if proxy:
+            ctx_kwargs["proxy"] = proxy
+        self._context = await self._browser.new_context(**ctx_kwargs)
         self._page = await self._context.new_page()
         await self._land()
         return self
@@ -627,6 +634,7 @@ async def scrape_summit_probate(
     end_date: date,
     case_types: tuple[SummitCaseType, ...] = PROBATE_CASE_TYPES,
     headed: bool = False,
+    proxy_url: Optional[str] = None,
 ) -> list[NoticeData]:
     """Scrape Summit County probate case openings via eServices.
 
@@ -638,7 +646,7 @@ async def scrape_summit_probate(
     results_by_case: dict[str, NoticeData] = {}
     stats = {"rows": 0, "emitted": 0, "detail_failed": 0}
 
-    async with SummitProbateClient(headed=headed) as client:
+    async with SummitProbateClient(headed=headed, proxy_url=proxy_url) as client:
         for i, ctype in enumerate(case_types):
             if i > 0:
                 await asyncio.sleep(BETWEEN_SEARCH_DELAY_MS / 1000)

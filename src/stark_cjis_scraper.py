@@ -121,15 +121,19 @@ class StarkCJISError(Exception):
 class StarkCJISClient:
     """Session-managed client for the Stark County CJIS REST API."""
 
-    def __init__(self, cookies: Optional[dict[str, str]] = None) -> None:
+    def __init__(self, cookies: Optional[dict[str, str]] = None,
+                 *, proxy_url: Optional[str] = None) -> None:
         self._cookies = cookies or {
             "cjis-id": config.STARK_CJIS_GUEST_ID,
             "cjis-token": config.STARK_CJIS_GUEST_TOKEN,
         }
-        self.session = self._make_session(self._cookies)
+        self.proxy_url = proxy_url
+        self.session = self._make_session(self._cookies, proxy_url=proxy_url)
 
     @staticmethod
-    def _make_session(cookies: dict[str, str]) -> requests.Session:
+    def _make_session(cookies: dict[str, str],
+                      *, proxy_url: Optional[str] = None) -> requests.Session:
+        from proxy_config import get_requests_proxies
         s = requests.Session()
         s.headers.update({
             "User-Agent": DEFAULT_USER_AGENT,
@@ -138,6 +142,9 @@ class StarkCJISClient:
             "Origin": BASE_URL,
             "Referer": f"{BASE_URL}/",
         })
+        proxies = get_requests_proxies(proxy_url)
+        if proxies:
+            s.proxies = proxies
         for name, value in cookies.items():
             s.cookies.set(name, value, domain="www.starkcjis.org")
         return s
@@ -149,10 +156,12 @@ class StarkCJISClient:
         like: postLogin('5c3f...', 'd8c8...'). If those values ever rotate,
         this re-extracts them automatically.
         """
+        from proxy_config import get_requests_proxies
         resp = requests.get(
             BASE_URL,
             headers={"User-Agent": DEFAULT_USER_AGENT},
             timeout=30,
+            proxies=get_requests_proxies(self.proxy_url) or None,
         )
         resp.raise_for_status()
         m = re.search(
@@ -162,7 +171,7 @@ class StarkCJISClient:
         if not m:
             raise StarkCJISError("postLogin(id, token) not found in homepage HTML")
         self._cookies = {"cjis-id": m.group(1), "cjis-token": m.group(2)}
-        self.session = self._make_session(self._cookies)
+        self.session = self._make_session(self._cookies, proxy_url=self.proxy_url)
         logger.info("Refreshed Stark CJIS guest cookies from homepage")
 
     # ── Search ──
@@ -213,16 +222,33 @@ class StarkCJISClient:
         *,
         params: Optional[list[tuple[str, str]]] = None,
         timeout: int,
-        max_attempts: int = 2,
+        max_attempts: int = 4,
     ) -> requests.Response:
-        """GET with one retry on 401 (session expired) and transient timeouts."""
+        """GET with retry on transient errors (session expired, 5xx, WAF 4xx).
+
+        Residential-proxy routing introduces per-tunnel flakiness: some IPs
+        are flagged by site WAFs and respond with 403/405/429 even to valid
+        GETs. Retrying gets a fresh residential tunnel (often a different
+        IP) that usually works. Each retry re-runs through the same proxy
+        URL — the IP rotation is handled by the proxy server.
+        """
+        import time as _time
+        WAF_CODES = {403, 405, 408, 409, 429}
         last_exc: Optional[Exception] = None
         for attempt in range(max_attempts):
             try:
                 resp = self.session.get(url, params=params, timeout=timeout)
             except requests.Timeout as e:
                 last_exc = e
-                logger.warning("Timeout on %s (attempt %d)", url, attempt + 1)
+                logger.warning("Timeout on %s (attempt %d/%d)",
+                               url, attempt + 1, max_attempts)
+                _time.sleep(2 * (attempt + 1))
+                continue
+            except requests.RequestException as e:
+                last_exc = e
+                logger.warning("Request failed on %s (attempt %d/%d): %s",
+                               url, attempt + 1, max_attempts, e)
+                _time.sleep(2 * (attempt + 1))
                 continue
 
             if resp.status_code == 401 or \
@@ -232,9 +258,22 @@ class StarkCJISClient:
                 continue
 
             if resp.status_code >= 500:
-                # Server-side issue; log and retry once
                 last_exc = StarkCJISError(f"{resp.status_code} for {url}")
-                logger.warning("Server %d on %s (attempt %d)", resp.status_code, url, attempt + 1)
+                logger.warning("Server %d on %s (attempt %d/%d)",
+                               resp.status_code, url, attempt + 1, max_attempts)
+                _time.sleep(2 * (attempt + 1))
+                continue
+
+            if resp.status_code in WAF_CODES:
+                last_exc = StarkCJISError(
+                    f"{resp.status_code} (WAF / proxy-IP-flagged) for {url}"
+                )
+                logger.warning(
+                    "WAF %d on %s (attempt %d/%d) — likely proxy IP flagged; "
+                    "retrying for fresh tunnel",
+                    resp.status_code, url, attempt + 1, max_attempts,
+                )
+                _time.sleep(3 * (attempt + 1))  # longer backoff for WAF
                 continue
 
             resp.raise_for_status()
@@ -424,6 +463,8 @@ def scrape_stark_foreclosures(
     end_date: date,
     include_tax_foreclosures: bool = True,
     include_unclassified: bool = False,
+    *,
+    proxy_url: Optional[str] = None,
 ) -> list[NoticeData]:
     """Fetch all CPC foreclosure filings from Stark CJIS in a date window.
 
@@ -442,7 +483,7 @@ def scrape_stark_foreclosures(
         List of NoticeData objects with notice_type='foreclosure', county='Stark',
         ready for the standard SiftStack enrichment + DataSift pipeline.
     """
-    client = StarkCJISClient()
+    client = StarkCJISClient(proxy_url=proxy_url)
 
     logger.info("Stark CJIS: searching CPC Civil filings %s to %s",
                 start_date, end_date)

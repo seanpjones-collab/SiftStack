@@ -60,25 +60,71 @@ CATEGORIES: list[AlnCategory] = [
 # ── Login ──────────────────────────────────────────────────────────────
 
 
-async def login(page: Page) -> bool:
-    """Log in to akronlegalnews.com. Returns True on success."""
+async def login(page: Page, *, max_attempts: int = 3) -> bool:
+    """Log in to akronlegalnews.com. Returns True on success.
+
+    ALN's aging PHP login is flaky through residential proxies — sometimes
+    the POST returns a login page back instead of redirecting (no
+    session cookie set). A simple retry with a short backoff recovers in
+    practice without needing a different proxy IP. Behavior under direct
+    home-IP traffic is unchanged (first attempt succeeds).
+    """
     if not config.ALN_EMAIL or not config.ALN_PASSWORD:
         logger.error("ALN_EMAIL / ALN_PASSWORD not set in .env")
         return False
 
-    logger.info("Logging in to %s", LOGIN_URL)
-    await page.goto(LOGIN_URL, wait_until="domcontentloaded")
-    await page.fill('input[name="user_name"]', config.ALN_EMAIL)
-    await page.fill('input[name="password"]', config.ALN_PASSWORD)
-    await page.click('input[name="submit"]')
-    await page.wait_for_load_state("domcontentloaded")
+    last_url = ""
+    for attempt in range(1, max_attempts + 1):
+        logger.info("Logging in to %s (attempt %d/%d)",
+                    LOGIN_URL, attempt, max_attempts)
+        try:
+            await page.goto(LOGIN_URL, wait_until="domcontentloaded",
+                            timeout=30_000)
+            await page.fill('input[name="user_name"]', config.ALN_EMAIL)
+            await page.fill('input[name="password"]', config.ALN_PASSWORD)
+            await page.click('input[name="submit"]')
+            await page.wait_for_load_state("domcontentloaded", timeout=30_000)
+        except Exception as exc:
+            last_url = page.url or ""
+            logger.warning("ALN login attempt %d/%d threw: %s",
+                           attempt, max_attempts, exc)
+            if attempt < max_attempts:
+                await page.wait_for_timeout(2_000 * attempt)  # 2s, 4s backoff
+                continue
+            logger.error("ALN login failed after %d attempts", max_attempts)
+            return False
 
-    # Verify authentication: header shows Logout link instead of Login
-    logout = await page.query_selector('a[href="/logout"]')
-    if logout:
-        logger.info("ALN login successful")
-        return True
-    logger.error("ALN login failed — no logout link found (URL=%s)", page.url)
+        # Verify logged-in state via multiple signals — the post-login UI
+        # varies by which page ALN routes us to through residential proxies.
+        # Any of these is sufficient proof of auth.
+        last_url = page.url or ""
+        url_ok = (
+            "/paper/" in last_url
+            or "/subscribers/" in last_url
+            or "/notices/" in last_url
+            or "/account" in last_url
+        )
+        logout_link = await page.query_selector('a[href="/logout"]')
+        # Some ALN theme variants wrap Logout in a <button> or use a
+        # different path; fall back to a case-insensitive text match.
+        logout_text = None
+        if not logout_link:
+            logout_text = await page.query_selector('text=/Log\\s*Out/i')
+
+        if logout_link or logout_text or url_ok:
+            logger.info("ALN login successful on attempt %d (url=%s, "
+                        "logout_link=%s, logout_text=%s, url_ok=%s)",
+                        attempt, last_url, bool(logout_link),
+                        bool(logout_text), url_ok)
+            return True
+
+        logger.warning("ALN login attempt %d/%d: no logged-in signal "
+                       "(URL=%s) — retrying", attempt, max_attempts, last_url)
+        if attempt < max_attempts:
+            await page.wait_for_timeout(2_000 * attempt)
+
+    logger.error("ALN login failed after %d attempts — last URL=%s",
+                 max_attempts, last_url)
     return False
 
 
@@ -399,6 +445,7 @@ async def scrape_all(
     headed: bool = False,
     from_date: datetime | None = None,
     to_date: datetime | None = None,
+    proxy_url: str | None = None,
 ) -> list[NoticeData]:
     """End-to-end: login, scrape today's categories + optional archive, dedup, return.
 
@@ -407,9 +454,15 @@ async def scrape_all(
     Archive mode does not currently cover probate (no matching category in
     archive dropdown — probate is today-only until we map the archive codes).
     """
+    from proxy_config import get_playwright_proxy
+
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=not headed)
-        context = await browser.new_context(viewport={"width": 1400, "height": 900})
+        ctx_kwargs: dict = {"viewport": {"width": 1400, "height": 900}}
+        proxy = get_playwright_proxy(proxy_url)
+        if proxy:
+            ctx_kwargs["proxy"] = proxy
+        context = await browser.new_context(**ctx_kwargs)
         page = await context.new_page()
 
         if not await login(page):

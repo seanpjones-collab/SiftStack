@@ -153,8 +153,10 @@ class SummitClerkClient:
                 detail = client.fetch_case_detail(case_no)
     """
 
-    def __init__(self, *, headed: bool = False) -> None:
+    def __init__(self, *, headed: bool = False,
+                 proxy_url: Optional[str] = None) -> None:
         self.headed = headed
+        self.proxy_url = proxy_url
         self._pw = None
         self._browser = None
         self._context: Optional[BrowserContext] = None
@@ -162,12 +164,17 @@ class SummitClerkClient:
         self._req_session: Optional[requests.Session] = None
 
     async def __aenter__(self) -> "SummitClerkClient":
+        from proxy_config import get_playwright_proxy
         self._pw = await async_playwright().start()
         self._browser = await self._pw.chromium.launch(headless=not self.headed)
-        self._context = await self._browser.new_context(
+        ctx_kwargs = dict(
             viewport={"width": 1400, "height": 900},
             user_agent=DEFAULT_USER_AGENT,
         )
+        proxy = get_playwright_proxy(self.proxy_url)
+        if proxy:
+            ctx_kwargs["proxy"] = proxy
+        self._context = await self._browser.new_context(**ctx_kwargs)
         self._page = await self._context.new_page()
         await self._navigate_to_search_form()
         await self._warm_requests_session()
@@ -226,6 +233,7 @@ class SummitClerkClient:
 
     async def _warm_requests_session(self) -> None:
         """Copy Playwright cookies into a requests.Session for detail fetches."""
+        from proxy_config import get_requests_proxies
         assert self._context is not None
         cookies = await self._context.cookies(BASE_URL)
         s = requests.Session()
@@ -235,6 +243,9 @@ class SummitClerkClient:
             "Accept-Language": "en-US,en;q=0.9",
             "Referer": f"{BASE_URL}/PublicSite/SearchByMixed.aspx",
         })
+        proxies = get_requests_proxies(self.proxy_url)
+        if proxies:
+            s.proxies = proxies
         for c in cookies:
             s.cookies.set(c["name"], c["value"],
                           domain=c.get("domain", "clerk.summitoh.net"),
@@ -571,6 +582,7 @@ async def scrape_summit_clerk_foreclosures(
     case_types: tuple[tuple[str, str, str], ...] = FORECLOSURE_CASE_TYPES,
     include_unclassified: bool = False,
     headed: bool = False,
+    proxy_url: Optional[str] = None,
 ) -> list[NoticeData]:
     """Scrape Summit Common Pleas foreclosure filings.
 
@@ -592,7 +604,7 @@ async def scrape_summit_clerk_foreclosures(
     """
     case_nos_per_type: dict[str, tuple[str, str]] = {}  # case_no -> (notice_type, subtype)
 
-    async with SummitClerkClient(headed=headed) as client:
+    async with SummitClerkClient(headed=headed, proxy_url=proxy_url) as client:
         # 1. Collect all case numbers across case types and dates/months
         if months:
             for month, year in months:

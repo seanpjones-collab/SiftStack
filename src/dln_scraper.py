@@ -385,6 +385,7 @@ def scrape_dln_foreclosures(
     end_date: date,
     categories: tuple[DlnCategory, ...] = FORECLOSURE_CATEGORIES,
     per_page: int = 100,
+    proxy_url: Optional[str] = None,
 ) -> list[NoticeData]:
     """Pull DLN foreclosure notices whose first_run falls in [start_date, end_date].
 
@@ -393,6 +394,11 @@ def scrape_dln_foreclosures(
     """
     if start_date > end_date:
         raise ValueError("start_date > end_date")
+
+    # Route urllib.request.urlopen() calls through the Apify residential
+    # proxy when one is configured. No-op when proxy_url is None.
+    from proxy_config import install_urllib_proxy
+    install_urllib_proxy(proxy_url)
 
     results: dict[str, NoticeData] = {}
     stats = {"emitted": 0, "commercial": 0, "incomplete": 0,

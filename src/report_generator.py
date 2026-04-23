@@ -228,6 +228,47 @@ def _address_slug(notice: NoticeData) -> str:
     return slug[:50]
 
 
+def _record_slug(notice: NoticeData) -> str:
+    """Collision-free filename slug.
+
+    Many records — especially OH probate at Day 0 — have no property address
+    yet. Falling back to plain "unknown" means every such record overwrites
+    the previous one. We widen the slug with decedent/owner name + case-no
+    tail so every NoticeData gets a unique file.
+    """
+    # 1. Address-first (existing behavior, stays stable for records that have it)
+    if notice.address:
+        return _address_slug(notice)
+
+    # 2. Decedent / owner name as the primary identifier
+    name = notice.decedent_name or notice.owner_name or ""
+    name_part = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")[:40]
+
+    # 3. Case-number tail from source_url — carries most of the collision-
+    #    breaking information for probate records.
+    case_tail = ""
+    m = re.search(r"(?:case_no|caseNum|CaseNo)=([\w\-]+)", notice.source_url or "")
+    if m:
+        case_tail = re.sub(r"[^a-z0-9]+", "_", m.group(1).lower()).strip("_")[:25]
+    if not case_tail:
+        m = re.search(r"/search/detail/(\d+)", notice.source_url or "")
+        if m:
+            case_tail = f"aln_{m.group(1)}"
+
+    # 4. Assemble, falling back to county+type+hash if every other signal is
+    #    missing (shouldn't happen in practice but keeps the guarantee).
+    parts = [p for p in (name_part, case_tail) if p]
+    if parts:
+        return "_".join(parts)[:60]
+    import hashlib
+    digest = hashlib.sha1(
+        f"{notice.county}|{notice.notice_type}|{notice.source_url}".encode()
+    ).hexdigest()[:10]
+    county_part = re.sub(r"[^a-z0-9]+", "_", (notice.county or "").lower()).strip("_")
+    type_part = re.sub(r"[^a-z0-9]+", "_", notice.notice_type).strip("_")
+    return f"{county_part}_{type_part}_{digest}"[:60]
+
+
 # ── Case Summary helpers (deceased-owner streamline section) ─────────
 
 def _bullet_list(items: list[str]) -> list:
@@ -328,11 +369,26 @@ def generate_record_pdf(
     """
     if output_dir is None:
         output_dir = Path("output/reports")
+    date_str = datetime.now().strftime("%Y-%m-%d")
+
+    # Organize by run-date so output/reports/ stays browsable as volume grows.
+    # Consumers that scan for today's PDFs look in output/reports/{date_str}/.
+    # If caller passes an explicit output_dir that already includes a date-
+    # shaped suffix, don't double up.
+    if output_dir.name != date_str:
+        output_dir = output_dir / date_str
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    filename = f"{_address_slug(notice)}_{date_str}.pdf"
+    # Unique-per-record slug (falls back cleanly when address is missing).
+    filename = f"{_record_slug(notice)}_{date_str}.pdf"
     pdf_path = output_dir / filename
+    # Defense-in-depth: if two records STILL collide on slug (extremely rare —
+    # same address + same day), append a disambiguator instead of overwriting.
+    if pdf_path.exists():
+        i = 2
+        while (output_dir / f"{_record_slug(notice)}_{date_str}_{i}.pdf").exists():
+            i += 1
+        pdf_path = output_dir / f"{_record_slug(notice)}_{date_str}_{i}.pdf"
 
     doc = SimpleDocTemplate(
         str(pdf_path),

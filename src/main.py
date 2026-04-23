@@ -553,10 +553,11 @@ async def actor_main() -> None:
 
             total = len(notices)
 
-            # ── Handle async probate property lookup (TN only) ──────
-            # property_lookup is currently Knox/Blount-only (KGIS/TPAD).
-            # OH probates flow through enrichment with empty address until
-            # lookup_ohio_decedent_properties ships.
+            # ── Handle async probate property lookup ────────────────
+            # TN (Knox/Blount) uses property_lookup.py (KGIS/TPAD).
+            # OH (Cuyahoga/Stark) uses oh_property_lookup.py (MyPlace JSON
+            # + IasWorld commonsearch.aspx). Summit probate already has
+            # addresses from CourtView case-detail pages.
             tn_probate_notices = [
                 n for n in notices
                 if n.notice_type == "probate" and n.decedent_name
@@ -575,16 +576,29 @@ async def actor_main() -> None:
                 except Exception as exc:
                     Actor.log.warning("Property lookup failed: %s — continuing", exc)
 
-            oh_probates_missing = sum(
-                1 for n in notices
-                if n.notice_type == "probate" and n.state == "OH" and not n.address
-            )
-            if oh_probates_missing:
-                Actor.log.info(
-                    "OH probate: %d records missing property address "
-                    "(pending lookup_ohio_decedent_properties)",
-                    oh_probates_missing,
-                )
+            oh_probate_notices = [
+                n for n in notices
+                if n.notice_type == "probate" and n.decedent_name
+                and not n.address and n.state == "OH"
+            ]
+            if oh_probate_notices:
+                try:
+                    from oh_property_lookup import lookup_ohio_decedent_properties
+                    Actor.log.info(
+                        "Looking up property addresses for %d OH probate notices...",
+                        len(oh_probate_notices),
+                    )
+                    await lookup_ohio_decedent_properties(
+                        oh_probate_notices, proxy_url=proxy_url,
+                    )
+                except ImportError:
+                    Actor.log.warning(
+                        "oh_property_lookup module not found — skipping",
+                    )
+                except Exception as exc:
+                    Actor.log.warning(
+                        "OH property lookup failed: %s — continuing", exc,
+                    )
 
             # ── Enrichment ────────────────────────────────────────────
             from enrichment_pipeline import PipelineOptions, run_enrichment_pipeline
@@ -2197,11 +2211,9 @@ def _run_scrape_pipeline(args, counties, types) -> None:
     # that the rest of this function expects.
     notices = dispatch_result["records"]
     # Handle async probate property lookup before enrichment.
-    # property_lookup.py is Knox (KGIS) + Blount (TPAD) specific — it will
-    # return nothing for OH decedents until we land the Cuyahoga / Summit /
-    # Stark tax-assessor scrapers (TODO: lookup_ohio_decedent_properties).
-    # For now, only call it on TN records so we don't waste time hitting
-    # KGIS/TPAD with Cleveland/Akron/Canton surnames that can't match.
+    # Two separate modules: TN (Knox/Blount) uses KGIS/TPAD, OH (Cuyahoga/Stark)
+    # uses MyPlace JSON + IasWorld. Summit probate already has addresses from
+    # CourtView, so no lookup needed there.
     tn_probate_notices = [
         n for n in notices
         if n.notice_type == "probate"
@@ -2220,16 +2232,25 @@ def _run_scrape_pipeline(args, counties, types) -> None:
         except Exception as e:
             logging.warning("Property lookup failed: %s -- continuing without lookups", e)
 
-    oh_probates_missing_addr = sum(
-        1 for n in notices
-        if n.notice_type == "probate" and n.state == "OH" and not n.address
-    )
-    if oh_probates_missing_addr:
-        logging.info(
-            "OH probate: %d records missing property address — will flow to "
-            "DataSift with empty address (pending lookup_ohio_decedent_properties)",
-            oh_probates_missing_addr,
-        )
+    oh_probate_notices = [
+        n for n in notices
+        if n.notice_type == "probate"
+        and n.decedent_name
+        and not n.address
+        and n.state == "OH"
+    ]
+    if oh_probate_notices:
+        try:
+            from oh_property_lookup import lookup_ohio_decedent_properties
+            logging.info("Looking up property addresses for %d OH probate notices...",
+                         len(oh_probate_notices))
+            asyncio.run(lookup_ohio_decedent_properties(
+                oh_probate_notices, proxy_url=proxy_url,
+            ))
+        except ImportError:
+            logging.warning("oh_property_lookup module not found -- skipping")
+        except Exception as e:
+            logging.warning("OH property lookup failed: %s -- continuing", e)
 
     # Run unified enrichment pipeline
     from enrichment_pipeline import PipelineOptions, run_enrichment_pipeline

@@ -22,7 +22,11 @@ from config import (
     SavedSearch,
 )
 from data_formatter import deduplicate, write_csv, write_csv_by_type
-from scraper import scrape_all
+# TN (tnpublicnotice.com) scraper disabled 2026-04-22 — out of scope for the
+# current OH-focused operation. Re-enable by restoring SAVED_SEARCHES in
+# config.py and uncommenting this import.
+# from scraper import scrape_all
+from oh_dispatcher import scrape_ohio_all
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +38,12 @@ def _filter_searches(
     counties: list[str] | None,
     types: list[str] | None,
 ) -> list[SavedSearch]:
-    """Filter SAVED_SEARCHES by county and/or notice type."""
+    """Filter SAVED_SEARCHES by county and/or notice type.
+
+    NOTE: SAVED_SEARCHES is currently empty (TN disabled) so this always
+    returns []. Kept in the module so Apify's older branch compiles — the
+    live daily/historical paths route through scrape_ohio_all instead.
+    """
     searches = list(SAVED_SEARCHES)
 
     if counties:
@@ -63,9 +72,13 @@ def _preflight_check(mode: str) -> list[str]:
     enrichment_modes = scrape_modes | {"pdf-import", "photo-import", "dropbox-watch", "csv-import"}
     datasift_modes = {"manage-presets", "manage-sold", "phone-validate"}
 
-    if mode in scrape_modes:
+    # Scrape-mode credential blockers are Ohio-source-specific. The OH
+    # scrapers don't need TNPN credentials or 2Captcha — those are TN
+    # (tnpublicnotice.com) specific. Gate those checks behind a non-empty
+    # SAVED_SEARCHES (i.e. only if TN is re-enabled).
+    if mode in scrape_modes and config.SAVED_SEARCHES:
         if not config.TNPN_EMAIL or not config.TNPN_PASSWORD:
-            failures.append("TNPN_EMAIL / TNPN_PASSWORD not set (required for scraping)")
+            failures.append("TNPN_EMAIL / TNPN_PASSWORD not set (required for TN scraping)")
         if not config.CAPTCHA_API_KEY:
             failures.append("CAPTCHA_API_KEY not set (CAPTCHA solving will fail)")
 
@@ -90,8 +103,8 @@ def _preflight_check(mode: str) -> list[str]:
         if not config.TRESTLE_API_KEY:
             failures.append("TRESTLE_API_KEY not set (required for phone validation)")
 
-    # ── Connectivity checks (only for scrape modes) ─────────────────
-    if mode in scrape_modes:
+    # ── Connectivity checks (TN scrape only) ────────────────────────
+    if mode in scrape_modes and config.SAVED_SEARCHES:
         import requests as _requests
         try:
             resp = _requests.head(config.BASE_URL, timeout=10, allow_redirects=True)
@@ -100,8 +113,8 @@ def _preflight_check(mode: str) -> list[str]:
         except Exception as e:
             failures.append(f"Cannot reach tnpublicnotice.com: {e}")
 
-    # ── 2Captcha balance check ──────────────────────────────────────
-    if mode in scrape_modes and config.CAPTCHA_API_KEY:
+    # ── 2Captcha balance check (TN scrape only) ─────────────────────
+    if mode in scrape_modes and config.SAVED_SEARCHES and config.CAPTCHA_API_KEY:
         import requests as _requests
         try:
             resp = _requests.get(
@@ -323,13 +336,15 @@ async def actor_main() -> None:
                     Actor.log.warning("Failed to persist seen_notice_ids to KVS: %s", e)
 
             # ── Scrape ────────────────────────────────────────────────
-            notices = await scrape_all(
-                mode=mode, searches=searches, proxy_url=proxy_url, on_batch=push_batch,
-                since_date_override=since_date_override or None,
-                llm_api_key=config.ANTHROPIC_API_KEY or None,
-                start_page=start_page,
-                seen_ids=seen_ids,
-                on_search_complete=persist_seen_ids,
+            # Apify Actor branch still references the (now-disabled) TN
+            # scrape_all flow. Fail loud rather than silently run empty —
+            # the OH dispatcher needs its own Apify wiring (date-window
+            # resolution, per-county KVS state, incremental push_batch)
+            # before this branch can be turned back on.
+            raise RuntimeError(
+                "Apify Actor mode is not wired for the Ohio dispatcher yet. "
+                "Run from the CLI (python src/main.py daily) until "
+                "actor_main() is ported. See oh_dispatcher.scrape_ohio_all."
             )
             # Handle async probate lookup before pipeline (requires await)
             probate_notices = [n for n in notices if n.notice_type == "probate" and n.decedent_name and not n.address]
@@ -1683,7 +1698,7 @@ def cli_main() -> None:
         _run_csv_import(args)
         return
 
-    # Filter saved searches
+    # Parse CLI filters (case-insensitive "all" = no filter)
     counties = None
     if args.counties and args.counties.lower() != "all":
         counties = [c.strip() for c in args.counties.split(",")]
@@ -1692,19 +1707,13 @@ def cli_main() -> None:
     if args.types and args.types.lower() != "all":
         types = [t.strip() for t in args.types.split(",")]
 
-    searches = _filter_searches(counties, types)
-    if not searches:
-        logging.error("No saved searches match the given --counties / --types filters")
-        sys.exit(1)
-
     logging.info(
-        "Running %d saved searches: %s",
-        len(searches),
-        ", ".join(s.saved_search_name for s in searches),
+        "OH dispatch: counties=%s  types=%s  mode=%s",
+        counties or "all", types or "all", args.mode,
     )
 
     try:
-        _run_scrape_pipeline(args, searches)
+        _run_scrape_pipeline(args, counties, types)
     except Exception as e:
         logging.exception("Pipeline failed with unhandled error")
         try:
@@ -1715,26 +1724,85 @@ def cli_main() -> None:
         sys.exit(1)
 
 
-def _run_scrape_pipeline(args, searches) -> None:
-    """Run the daily/historical scrape → enrich → export → upload pipeline."""
-    # Scrape
-    notices = asyncio.run(scrape_all(
-        mode=args.mode, searches=searches,
-        llm_api_key=config.ANTHROPIC_API_KEY or None,
-        since_date_override=args.since,
-        max_notices=args.max_notices,
+def _resolve_ohio_date_window(args) -> tuple:
+    """Map CLI args to (start_date, end_date) for the OH dispatcher.
+
+    Precedence:
+      1. Explicit `--since YYYY-MM-DD` → [since, today]
+      2. `daily` mode → [today - OH_DAILY_LOOKBACK_DAYS + 1, today]
+      3. `historical` mode → [today - OH_HISTORICAL_LOOKBACK_DAYS + 1, today]
+    """
+    from datetime import date as _date, datetime as _datetime, timedelta as _td
+
+    today = _date.today()
+
+    if args.since:
+        try:
+            start = _datetime.strptime(args.since.strip(), "%Y-%m-%d").date()
+        except ValueError as exc:
+            raise SystemExit(
+                f"--since must be YYYY-MM-DD, got {args.since!r}: {exc}"
+            ) from exc
+        return start, today
+
+    if args.mode == "historical":
+        return today - _td(days=config.OH_HISTORICAL_LOOKBACK_DAYS - 1), today
+
+    # daily (default)
+    return today - _td(days=config.OH_DAILY_LOOKBACK_DAYS - 1), today
+
+
+def _run_scrape_pipeline(args, counties, types) -> None:
+    """Run the daily/historical scrape → enrich → export → upload pipeline.
+
+    Routes through the Ohio dispatcher (3 counties × 2 notice types = 6
+    source-specific scrapers). The prior TN path via scrape_all() is
+    disabled — re-enable by reinstating SAVED_SEARCHES in config.py and
+    calling scrape_all here.
+    """
+    start_date, end_date = _resolve_ohio_date_window(args)
+    logging.info("OH scrape window: %s → %s", start_date, end_date)
+
+    notices = asyncio.run(scrape_ohio_all(
+        start_date=start_date,
+        end_date=end_date,
+        counties=counties,
+        types=types,
     ))
-    # Handle async probate lookup before pipeline (requires asyncio.run)
-    probate_notices = [n for n in notices if n.notice_type == "probate" and n.decedent_name and not n.address]
-    if probate_notices:
+    # Handle async probate property lookup before enrichment.
+    # property_lookup.py is Knox (KGIS) + Blount (TPAD) specific — it will
+    # return nothing for OH decedents until we land the Cuyahoga / Summit /
+    # Stark tax-assessor scrapers (TODO: lookup_ohio_decedent_properties).
+    # For now, only call it on TN records so we don't waste time hitting
+    # KGIS/TPAD with Cleveland/Akron/Canton surnames that can't match.
+    tn_probate_notices = [
+        n for n in notices
+        if n.notice_type == "probate"
+        and n.decedent_name
+        and not n.address
+        and n.state == "TN"
+    ]
+    if tn_probate_notices:
         try:
             from property_lookup import lookup_decedent_properties
-            logging.info("Looking up property addresses for %d probate notices...", len(probate_notices))
-            asyncio.run(lookup_decedent_properties(probate_notices))
+            logging.info("Looking up property addresses for %d TN probate notices...",
+                         len(tn_probate_notices))
+            asyncio.run(lookup_decedent_properties(tn_probate_notices))
         except ImportError:
             logging.warning("property_lookup module not found -- skipping property lookup")
         except Exception as e:
             logging.warning("Property lookup failed: %s -- continuing without lookups", e)
+
+    oh_probates_missing_addr = sum(
+        1 for n in notices
+        if n.notice_type == "probate" and n.state == "OH" and not n.address
+    )
+    if oh_probates_missing_addr:
+        logging.info(
+            "OH probate: %d records missing property address — will flow to "
+            "DataSift with empty address (pending lookup_ohio_decedent_properties)",
+            oh_probates_missing_addr,
+        )
 
     # Run unified enrichment pipeline
     from enrichment_pipeline import PipelineOptions, run_enrichment_pipeline

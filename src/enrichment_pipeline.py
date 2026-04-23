@@ -98,6 +98,11 @@ def _filter_vacant_land(notices: list[NoticeData]) -> list[NoticeData]:
 
     Vacant land parcels (e.g., "0 Andersonville Pike", "0000 Old Rd",
     or just "Andersonville Pike") are not actionable for marketing.
+
+    Probate records with an ENTIRELY empty address are preserved — the
+    property-lookup step may fill them in later (Cuyahoga + Stark probate
+    feeds carry decedent-only records pending tax-assessor lookup). An
+    address that's non-empty but malformed (vacant land) is still dropped.
     """
 
     def _has_house_number(addr: str) -> bool:
@@ -109,8 +114,18 @@ def _filter_vacant_land(notices: list[NoticeData]) -> list[NoticeData]:
             return False
         return int(m.group(1)) > 0
 
+    def _keep(n: NoticeData) -> bool:
+        if _has_house_number(n.address):
+            return True
+        # Probate records with nothing in the address field — preserve for
+        # downstream lookup. Anything with junk (non-empty but no house num)
+        # falls through and is filtered.
+        if n.notice_type == "probate" and not n.address.strip():
+            return True
+        return False
+
     before = len(notices)
-    result = [n for n in notices if _has_house_number(n.address)]
+    result = [n for n in notices if _keep(n)]
     removed = before - len(result)
     if removed:
         logger.info("  Removed %d vacant land records (no house number)", removed)
@@ -206,24 +221,40 @@ def _validate_records(notices: list[NoticeData]) -> list[NoticeData]:
       - address, city, zip must be non-empty
       - address must contain at least one letter (not pure garbage OCR)
       - date fields must be valid YYYY-MM-DD format if present
+
+    Probate records with decedent_name set but no property address yet are
+    preserved — the Ohio tax-assessor lookup (future) fills those in. This
+    lets Cuyahoga + Stark probate feeds carry decedent-only records through
+    to DataSift without getting dropped here.
     """
     valid = []
     invalid_count = 0
 
     for n in notices:
+        # Skip address/city/zip validation for probate records that are
+        # explicitly pre-lookup (decedent named, address not yet resolved).
+        is_probate_pre_lookup = (
+            n.notice_type == "probate"
+            and bool((n.decedent_name or "").strip())
+            and not n.address.strip()
+        )
+
         issues = []
 
         # Required fields
-        if not n.address.strip():
-            issues.append("missing address")
-        elif _GARBAGE_RE.match(n.address):
-            issues.append(f"garbage address: {n.address!r}")
+        if is_probate_pre_lookup:
+            pass  # address/city/zip intentionally deferred
+        else:
+            if not n.address.strip():
+                issues.append("missing address")
+            elif _GARBAGE_RE.match(n.address):
+                issues.append(f"garbage address: {n.address!r}")
 
-        if not n.city.strip():
-            issues.append("missing city")
+            if not n.city.strip():
+                issues.append("missing city")
 
-        if not n.zip.strip():
-            issues.append("missing zip")
+            if not n.zip.strip():
+                issues.append("missing zip")
 
         # Date format validation (only if populated)
         for date_field in ("date_added", "auction_date"):

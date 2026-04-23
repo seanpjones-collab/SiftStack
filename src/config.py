@@ -124,10 +124,27 @@ class SavedSearch:
 
 # ── Saved Searches ─────────────────────────────────────────────────────
 # These names must match exactly what appears in the dropdown on the site.
+# DISABLED 2026-04-22: TN (Knox/Blount) coverage is out of scope for the
+# current Ohio-focused operation. Left in place (commented) as a reference
+# pattern — the tnpublicnotice.com scraper + SavedSearch dataclass is the
+# blueprint we ported to the per-county OH adapters in oh_dispatcher.py.
+# Re-enable by uncommenting these entries and wiring scrape_all() back into
+# main.py's daily/historical branches.
 SAVED_SEARCHES: list[SavedSearch] = [
-    SavedSearch("Knox", "foreclosure", "Foreclosure V2 Knox"),
-    SavedSearch("Blount", "foreclosure", "Foreclosure V2 Blount"),
+    # SavedSearch("Knox", "foreclosure", "Foreclosure V2 Knox"),
+    # SavedSearch("Blount", "foreclosure", "Foreclosure V2 Blount"),
 ]
+
+# Ohio counties covered by oh_dispatcher.scrape_ohio_all()
+OHIO_COUNTIES: tuple[str, ...] = ("Cuyahoga", "Summit", "Stark")
+
+# How many days back a `daily` run looks when no explicit window is given.
+# Covers weekend gaps + late filings published days after the docket entry.
+OH_DAILY_LOOKBACK_DAYS: int = 7
+
+# `historical` mode default window (days). Mirrors the TN pipeline's
+# "last 12 months" default.
+OH_HISTORICAL_LOOKBACK_DAYS: int = 365
 
 # ── Entity Detection ──────────────────────────────────────────────────
 # Business entity patterns — shared across obituary_enricher, tax_enricher,

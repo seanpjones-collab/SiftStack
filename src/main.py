@@ -316,10 +316,6 @@ async def actor_main() -> None:
 
         try:
             kvs = await Actor.open_key_value_store()
-            try:
-                kvs_id = kvs._id if hasattr(kvs, "_id") else ""
-            except Exception:
-                kvs_id = ""
 
             # stark_probate's binary-search high-watermark probe is ~15 GETs.
             # Cache it so daily runs start one above yesterday's high and
@@ -673,7 +669,6 @@ async def actor_main() -> None:
                 try:
                     from report_generator import generate_record_pdf
                     kvs = await Actor.open_key_value_store()
-                    kvs_id = kvs._id if hasattr(kvs, '_id') else ''
                     report_dir = Path("output/reports")
 
                     for n in dp_candidates:
@@ -683,7 +678,9 @@ async def actor_main() -> None:
                         key = pdf_path.name
                         with open(pdf_path, "rb") as f:
                             await kvs.set_value(key, f.read(), content_type="application/pdf")
-                        url = f"https://api.apify.com/v2/key-value-stores/{kvs_id}/records/{key}"
+                        # get_public_url returns a signed URL that works
+                        # without an Apify API token — safe to share in Slack.
+                        url = kvs.get_public_url(key)
                         pdf_urls.append({"address": n.address, "url": url})
 
                     Actor.log.info("Generated %d deep prospecting PDFs (%d records skipped — no DP data)",
@@ -736,9 +733,8 @@ async def actor_main() -> None:
                     key = f"datasift_{info['label'].lower().replace(' ', '_')}.csv"
                     with open(info["path"], "rb") as f:
                         await kvs.set_value(key, f.read(), content_type="text/csv")
-                    # Build public download URL
-                    kvs_id = kvs._id if hasattr(kvs, '_id') else ''
-                    url = f"https://api.apify.com/v2/key-value-stores/{kvs_id}/records/{key}"
+                    # Signed public URL — works without an Apify API token.
+                    url = kvs.get_public_url(key)
                     datasift_csv_urls.append({"label": info["label"], "url": url, "records": info.get("count", "?")})
                     Actor.log.info("DataSift CSV (%s) saved to KVS: %s", info["label"], key)
             except Exception as e:

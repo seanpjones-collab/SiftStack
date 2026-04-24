@@ -73,6 +73,11 @@ DATASIFT_COLUMNS = [
     "Bedrooms",
     "Bathrooms",
     "Lot (Acres)",
+    # ── Smarty USPS validation (populated by address_standardizer) ──
+    "Mailable",                 # Yes if USPS will deliver (dpv_match_code in Y/S)
+    "USPS Verified",            # Yes if strict USPS match (dpv_match_code = Y)
+    "Vacant",                   # Yes if Smarty flags property as vacant
+    "RDI",                      # Residential / Commercial / Mixed (Smarty RDI)
     # ── Custom fields (SiftStack group) ──
     "Notice Type",
     "County",
@@ -749,6 +754,17 @@ def _build_row(notice: NoticeData, notes_override: str | None = None) -> dict:
         "Bedrooms": notice.bedrooms,
         "Bathrooms": notice.bathrooms,
         "Lot (Acres)": notice.lot_size,
+        # ── Smarty USPS validation ──
+        # dpv_match_code: Y=confirmed, S=confirmed but unit missing, D=confirmed
+        #   but needs secondary, N=not confirmed, "" = Smarty skipped/failed.
+        # Mailable = USPS can deliver (Y or S). USPS Verified = strict (Y).
+        "Mailable": ("Yes" if notice.dpv_match_code in ("Y", "S")
+                     else "No" if notice.dpv_match_code else ""),
+        "USPS Verified": ("Yes" if notice.dpv_match_code == "Y"
+                          else "No" if notice.dpv_match_code else ""),
+        "Vacant": ("Yes" if notice.vacant == "Y"
+                   else "No" if notice.vacant else ""),
+        "RDI": notice.rdi or "",
         # ── Custom fields (SiftStack group) ──
         "Notice Type": notice.notice_type,
         "County": notice.county,

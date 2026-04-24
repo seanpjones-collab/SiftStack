@@ -1133,11 +1133,18 @@ def _lookup_dm_address_serper_firecrawl(
 
 
 def _lookup_dm_address_tracerfy(name: str, city: str,
-                                 address: str = "", zip_code: str = "") -> dict | None:
+                                 address: str = "", zip_code: str = "",
+                                 state: str = "TN") -> dict | None:
     """Look up DM mailing address via Tracerfy Instant Trace API.
 
     Uses POST /v1/api/trace/lookup/ (synchronous, single-record).
     Cost: 5 credits ($0.10) per hit, 0 on miss. Rate limit: 500 RPM.
+
+    Args:
+        state: Narrows the skip-trace geography. Pass the notice's state
+            (notice.state) so OH decedents don't get searched in TN.
+            Defaults to "TN" for back-compat with the original Knox/Blount
+            pipeline that predates this argument.
     """
     import config as cfg
 
@@ -1161,7 +1168,7 @@ def _lookup_dm_address_tracerfy(name: str, city: str,
             json={
                 "address": address or "",
                 "city": city or "",
-                "state": "TN",
+                "state": state or "TN",
                 "zip": zip_code or "",
                 "find_owner": False,
                 "first_name": first_name,
@@ -1192,7 +1199,8 @@ def _lookup_dm_address_tracerfy(name: str, city: str,
             return {
                 "street": street,
                 "city": (mail.get("city") or "").strip(),
-                "state": (mail.get("state") or "TN").strip(),
+                # Default to the search state the caller passed, not "TN".
+                "state": (mail.get("state") or state or "").strip(),
                 "zip": (mail.get("zip") or "").strip(),
             }
         return None
@@ -1229,9 +1237,14 @@ def _batch_tracerfy_lookup(notices: list) -> None:
         last_name = parts[-1]
         # Use property address as the known address for skip tracing
         addr = n.address.strip()
-        city_hint = n.city.strip() or "Knoxville"
+        # Use the notice's own state (always set by scrapers) as the search
+        # geography — don't hardcode "TN" or default unknown city to
+        # "Knoxville" for non-TN records.
+        state_hint = (n.state or "TN").upper()
+        city_default = "Knoxville" if state_hint == "TN" else ""
+        city_hint = n.city.strip() or city_default
         zip_code = n.zip.strip()
-        writer.writerow([first_name, last_name, addr, city_hint, "TN",
+        writer.writerow([first_name, last_name, addr, city_hint, state_hint,
                          zip_code, "", "", ""])
         lookup_map.append((n, first_name, last_name))
 
@@ -1313,7 +1326,12 @@ def _batch_tracerfy_lookup(notices: list) -> None:
                             and not notice.decision_maker_street):
                         notice.decision_maker_street = street
                         notice.decision_maker_city = (rec.get("mail_city") or "").strip()
-                        notice.decision_maker_state = (rec.get("mail_state") or "TN").strip()
+                        # Default to the notice's own state, not hardcoded "TN".
+                        # An OH probate with a DM whose Tracerfy record lacks a
+                        # state field should inherit "OH", not TN.
+                        notice.decision_maker_state = (
+                            rec.get("mail_state") or notice.state or ""
+                        ).strip()
                         notice.decision_maker_zip = (rec.get("mail_zip") or "").strip()
                         matched += 1
                         logger.info(
@@ -1332,13 +1350,20 @@ def _batch_tracerfy_lookup(notices: list) -> None:
 
 def _lookup_dm_address(
     name: str, city: str, api_key: str, tracerfy_tier1: bool = False,
+    state: str = "TN",
 ) -> dict:
     """Look up decision-maker's mailing address using tiered sources.
 
     Tier 0 (opt-in): Tracerfy skip tracing (paid, highest hit rate)
-    Tier 1: Knox County Tax API (free, fast, Knox only)
+    Tier 1: Knox County Tax API (free, fast, TN only — skipped for other states)
     Tier 2: Serper.dev + Firecrawl + LLM (cheap, national)
     Tier 2b: DuckDuckGo fallback (free, unreliable -- used when Serper not configured)
+
+    Args:
+        state: Notice's state (e.g., "OH" or "TN"). Gates Tier 1 (Knox is
+            TN-specific) and is passed to Tracerfy as the search state. City
+            fallbacks default to empty when state != "TN" so we don't stamp
+            Knoxville onto OH decedents.
 
     Returns {street, city, state, zip, source} (may have empty values).
     """
@@ -1347,12 +1372,18 @@ def _lookup_dm_address(
     if not name or not name.strip():
         return result
 
+    # Only fall back to "Knoxville" when we know we're in TN — for OH / any
+    # other state, an empty city is better than a wrong one.
+    state_upper = (state or "TN").upper()
+    city_fallback = "Knoxville" if state_upper == "TN" else ""
+
     # Tier 0 (opt-in): Tracerfy as primary lookup
     if tracerfy_tier1:
         import config as cfg
         if cfg.TRACERFY_API_KEY:
             tf_result = _lookup_dm_address_tracerfy(
-                name, city or "Knoxville", address="", zip_code=""
+                name, city or city_fallback, address="", zip_code="",
+                state=state_upper,
             )
             if tf_result and tf_result.get("street"):
                 result.update(tf_result)
@@ -1361,26 +1392,27 @@ def _lookup_dm_address(
                             result["street"], result["city"])
                 return result
 
-    # Tier 1: Knox County Tax API (free, fast)
-    knox_cities = {"knoxville", "powell", "corryton", "mascot", "halls",
-                   "farragut", "karns", "gibbs", "fountain city"}
-    dm_city = (city or "").lower().strip()
-    if not dm_city or dm_city in knox_cities:
-        name_parts = name.split()
-        if len(name_parts) >= 2:
-            tax_name = f"{name_parts[-1]} {' '.join(name_parts[:-1])}"
-            tax_result = _lookup_dm_address_knox_tax(tax_name)
-            if tax_result and tax_result.get("street"):
-                result.update(tax_result)
-                result["source"] = "knox_tax_api"
-                logger.info("    Tier 1 (Knox Tax): %s", result["street"])
-                return result
-        time.sleep(random.uniform(REQUEST_DELAY_MIN, REQUEST_DELAY_MAX))
+    # Tier 1: Knox County Tax API (free, fast) — TN-specific, skip for others.
+    if state_upper == "TN":
+        knox_cities = {"knoxville", "powell", "corryton", "mascot", "halls",
+                       "farragut", "karns", "gibbs", "fountain city"}
+        dm_city = (city or "").lower().strip()
+        if not dm_city or dm_city in knox_cities:
+            name_parts = name.split()
+            if len(name_parts) >= 2:
+                tax_name = f"{name_parts[-1]} {' '.join(name_parts[:-1])}"
+                tax_result = _lookup_dm_address_knox_tax(tax_name)
+                if tax_result and tax_result.get("street"):
+                    result.update(tax_result)
+                    result["source"] = "knox_tax_api"
+                    logger.info("    Tier 1 (Knox Tax): %s", result["street"])
+                    return result
+            time.sleep(random.uniform(REQUEST_DELAY_MIN, REQUEST_DELAY_MAX))
 
     # Tier 2: Direct people search URLs + Firecrawl + LLM
     import config as cfg
     sf_result = _lookup_dm_address_serper_firecrawl(
-        name, city or "Knoxville", api_key
+        name, city or city_fallback, api_key
     )
     if sf_result and sf_result.get("street"):
         result.update(sf_result)
@@ -1391,7 +1423,7 @@ def _lookup_dm_address(
 
     # Tier 2b: DuckDuckGo fallback (when Serper/Firecrawl not configured)
     if not cfg.SERPER_API_KEY and not cfg.FIRECRAWL_API_KEY:
-        web_result = _lookup_dm_address_web(name, city or "Knoxville", api_key)
+        web_result = _lookup_dm_address_web(name, city or city_fallback, api_key)
         if web_result and web_result.get("street"):
             result.update(web_result)
             result["source"] = "ddg_people_search"
@@ -2625,8 +2657,8 @@ def enrich_obituary_data(
                 "source": "probate_notice",
                 "rank": 1,
                 "street": notice.owner_street,
-                "city": notice.owner_city or "Knoxville",
-                "state": "TN",
+                "city": notice.owner_city or notice.city or "",
+                "state": notice.owner_state or notice.state or "",
                 "zip": notice.owner_zip,
             }]
             error_info = {
@@ -2871,8 +2903,8 @@ def enrich_obituary_data(
                 "source": "estate_fallback",
                 "rank": 1,
                 "street": notice.address,
-                "city": notice.city or "Knoxville",
-                "state": "TN",
+                "city": notice.city or "",
+                "state": notice.state or "",
                 "zip": notice.zip,
             }]
             error_info = {
@@ -2923,7 +2955,8 @@ def enrich_obituary_data(
                     j, len(matches), dm_name, dm_city_hint or "unknown",
                 )
                 addr = _lookup_dm_address(dm_name, dm_city_hint, api_key,
-                                          tracerfy_tier1=tracerfy_tier1)
+                                          tracerfy_tier1=tracerfy_tier1,
+                                          state=notice.state or "TN")
                 if addr.get("street"):
                     dm.update(addr)
                     source = addr.get("source", "unknown")
@@ -2943,6 +2976,7 @@ def enrich_obituary_data(
                     tracerfy_result = _lookup_dm_address_tracerfy(
                         dm_name, dm_city_hint or city,
                         address=notice.address, zip_code=notice.zip,
+                        state=notice.state or "TN",
                     )
                     if tracerfy_result and tracerfy_result.get("street"):
                         dm.update(tracerfy_result)
@@ -2958,8 +2992,11 @@ def enrich_obituary_data(
                 # Tier 4: Property address fallback (DM #1 only — others left empty)
                 if dm is ranked_dms[0] and dm.get("source") != "estate_fallback":
                     dm["street"] = notice.address
-                    dm["city"] = notice.city or "Knoxville"
-                    dm["state"] = "TN"
+                    # Fall back to the notice's own city/state rather than
+                    # hardcoded Knoxville/TN — OH records must not be stamped
+                    # with Tennessee just because city lookup failed.
+                    dm["city"] = notice.city or ""
+                    dm["state"] = notice.state or ""
                     dm["zip"] = notice.zip
                     dm_addr_sources["property_fallback"] = (
                         dm_addr_sources.get("property_fallback", 0) + 1

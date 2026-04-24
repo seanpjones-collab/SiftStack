@@ -754,7 +754,11 @@ async def parse_notice_page(
             if not notice.owner_street and llm_result.get("owner_street"):
                 notice.owner_street = llm_result["owner_street"]
                 notice.owner_city = llm_result.get("owner_city") or notice.owner_city
-                notice.owner_state = llm_result.get("owner_state") or "TN"
+                # Default owner_state to the notice's state (always set by
+                # scrapers), not a hardcoded "TN".
+                notice.owner_state = (
+                    llm_result.get("owner_state") or notice.state or "TN"
+                )
                 notice.owner_zip = llm_result.get("owner_zip") or notice.owner_zip
                 logger.info("LLM filled PR address: %s", notice.owner_street)
         else:
@@ -1088,11 +1092,14 @@ def _parse_pr_address(notice: NoticeData) -> None:
             street = street.title()
         notice.owner_street = street
         notice.owner_city = _clean_city(match.group(2))
-        notice.owner_state = "TN"
+        # Use the notice's own state, not a hardcoded "TN". Scrapers set
+        # notice.state on every record; PR mailing state matches it.
+        notice.owner_state = notice.state or "TN"
         notice.owner_zip = match.group(3)
         logger.debug(
-            "PR address: %s, %s, TN %s",
-            notice.owner_street, notice.owner_city, notice.owner_zip,
+            "PR address: %s, %s, %s %s",
+            notice.owner_street, notice.owner_city,
+            notice.owner_state, notice.owner_zip,
         )
 
 

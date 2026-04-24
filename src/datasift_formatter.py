@@ -885,6 +885,7 @@ def write_datasift_split_csvs(
         "path": dm_path,
         "label": "DMs",
         "list_name": f"SiftStack {date_str} - DMs",
+        "count": dm_written,
     })
 
     # CSV 2: Heirs — only deceased with heir data
@@ -909,6 +910,7 @@ def write_datasift_split_csvs(
             "path": heir_path,
             "label": "Heirs",
             "list_name": f"SiftStack {date_str} - Heirs",
+            "count": heir_written,
         })
     else:
         logger.info("No deceased records with heir data — skipping Heirs CSV")

@@ -678,9 +678,9 @@ async def actor_main() -> None:
                         key = pdf_path.name
                         with open(pdf_path, "rb") as f:
                             await kvs.set_value(key, f.read(), content_type="application/pdf")
-                        # get_public_url returns a signed URL that works
-                        # without an Apify API token — safe to share in Slack.
-                        url = kvs.get_public_url(key)
+                        # Signed URL — works without an Apify API token.
+                        # get_public_url is async, MUST be awaited.
+                        url = await kvs.get_public_url(key)
                         pdf_urls.append({"address": n.address, "url": url})
 
                     Actor.log.info("Generated %d deep prospecting PDFs (%d records skipped — no DP data)",
@@ -734,7 +734,8 @@ async def actor_main() -> None:
                     with open(info["path"], "rb") as f:
                         await kvs.set_value(key, f.read(), content_type="text/csv")
                     # Signed public URL — works without an Apify API token.
-                    url = kvs.get_public_url(key)
+                    # get_public_url is async, MUST be awaited.
+                    url = await kvs.get_public_url(key)
                     datasift_csv_urls.append({"label": info["label"], "url": url, "records": info.get("count", "?")})
                     Actor.log.info("DataSift CSV (%s) saved to KVS: %s", info["label"], key)
             except Exception as e:

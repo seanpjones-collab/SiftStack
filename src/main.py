@@ -674,18 +674,13 @@ async def actor_main() -> None:
             onedrive = get_onedrive_client_from_env()
             run_date = datetime.now().strftime("%Y-%m-%d")
 
-            # OneDrive folder for this run. When the run is scoped to a
-            # single county and/or single notice type, append suffix(es) so
-            # parallel runs don't overwrite each other's CSVs at
-            # /SiftStack/{date}/. Unscoped runs keep the flat path.
-            run_counties = (counties or [])
-            run_types = (types or [])
-            _suffix = ""
-            if len(run_counties) == 1:
-                _suffix += f"/{run_counties[0]}"
-            if len(run_types) == 1:
-                _suffix += f"/{run_types[0]}"
-            run_folder = f"SiftStack/{run_date}{_suffix}"
+            # OneDrive folder for this run: flat structure under /SiftStack/{date}/.
+            # Per-run uniqueness comes from the filename itself
+            # ({date}_{County}_{type}_dms.csv) written by datasift_formatter,
+            # not from subfolders — prior nested layout
+            # (/SiftStack/{date}/{county}/{type}/datasift_dms.csv) made files
+            # painful to open (same name across folders) and hid them too deep.
+            run_folder = f"SiftStack/{run_date}"
 
             if dp_candidates:
                 try:
@@ -766,17 +761,23 @@ async def actor_main() -> None:
             try:
                 from datasift_formatter import write_datasift_split_csvs
 
+                # Filename stem: {date}_{County}_{type} derived from the
+                # notice batch's shared metadata (e.g. single-county runs
+                # get named by county). Keeps files uniquely identifiable
+                # when multiple parallel runs land in the same OneDrive folder.
                 csv_infos = write_datasift_split_csvs(notices)
                 kvs = await Actor.open_key_value_store()
                 for info in csv_infos:
-                    key = f"datasift_{info['label'].lower().replace(' ', '_')}.csv"
+                    # Use the actual output filename (not the generic "dms.csv")
+                    # so KVS + OneDrive match what's on disk.
+                    key = Path(info["path"]).name
                     with open(info["path"], "rb") as f:
                         await kvs.set_value(key, f.read(), content_type="text/csv")
 
                     url: Optional[str] = None
                     if onedrive is not None:
                         try:
-                            remote = f"{run_folder}/{key}"
+                            remote = f"SiftStack/{run_date}/{key}"
                             url, _ = await onedrive.upload_and_share(
                                 info["path"], remote,
                             )

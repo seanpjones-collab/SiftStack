@@ -846,9 +846,29 @@ def write_datasift_csv(
     return output_path
 
 
+def _infer_scope_suffix(notices: list[NoticeData]) -> str:
+    """Derive county/type suffix from a batch of notices for filename naming.
+
+    Inspects distinct counties and notice_types in the list:
+      - 1 county + 1 notice_type → "Cuyahoga_probate"
+      - 1 county, multiple types → "Stark_mixed"
+      - multiple counties + 1 type → "AllOH_foreclosure"
+      - multiple of both → "AllOH_mixed"
+      - empty or malformed → "" (caller falls back to date-only naming)
+    """
+    counties = {(n.county or "").strip() for n in notices if (n.county or "").strip()}
+    types = {(n.notice_type or "").strip() for n in notices if (n.notice_type or "").strip()}
+    if not counties and not types:
+        return ""
+    county_part = next(iter(counties)) if len(counties) == 1 else "AllOH"
+    type_part = next(iter(types)) if len(types) == 1 else "mixed"
+    return f"{county_part}_{type_part}"
+
+
 def write_datasift_split_csvs(
     notices: list[NoticeData],
     date_str: str | None = None,
+    stem: str | None = None,
 ) -> list[dict]:
     """Generate separate DM and Heir Map CSVs for two-upload Message Board flow.
 
@@ -861,19 +881,27 @@ def write_datasift_split_csvs(
     Args:
         notices: List of enriched NoticeData objects.
         date_str: Optional date string for filenames/list names (default: today).
+        stem: Optional filename stem override. If None, inferred as
+            "{date}_{county}_{notice_type}" from the notices' metadata. Forces
+            uniqueness across parallel runs so files in OneDrive/disk don't
+            collide on a single "datasift_dms.csv" name.
 
     Returns:
-        List of dicts: [{"path": Path, "label": str, "list_name": str}, ...]
+        List of dicts: [{"path": Path, "label": str, "list_name": str,
+                         "count": int}, ...]
         Returns 1 item if no deceased-with-heirs, 2 items otherwise.
     """
     if date_str is None:
         date_str = datetime.now().strftime("%Y-%m-%d")
 
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    if stem is None:
+        scope = _infer_scope_suffix(notices)
+        stem = f"{date_str}_{scope}" if scope else date_str
+
     results = []
 
     # CSV 1: DMs — all records
-    dm_path = OUTPUT_DIR / f"datasift_upload_DMs_{timestamp}.csv"
+    dm_path = OUTPUT_DIR / f"{stem}_dms.csv"
     dm_written = 0
     incomplete = 0
     issue_counts: dict[str, int] = {}
@@ -911,7 +939,7 @@ def write_datasift_split_csvs(
     ]
 
     if deceased_with_heirs:
-        heir_path = OUTPUT_DIR / f"datasift_upload_Heirs_{timestamp}.csv"
+        heir_path = OUTPUT_DIR / f"{stem}_heirs.csv"
         heir_written = 0
         with open(heir_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=DATASIFT_COLUMNS)

@@ -352,13 +352,14 @@ def main() -> int:
         logger.warning("SMARTY creds not set in .env — skipping standardization")
 
     # ── Emit DataSift CSVs ──
-    ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    stark_out = out_dir / f"stark_foreclosures_manual_{ts}.csv"
-    summit_out = out_dir / f"summit_foreclosures_manual_{ts}.csv"
+    # Naming convention: {date}_{County}_{type}_{kind}.csv
+    #   kind = "manual" for pre-automation historical imports
+    # Keeps files uniquely identifiable when opened side-by-side with
+    # automated-run outputs in the same OneDrive folder.
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    stark_out = out_dir / f"{date_str}_Stark_foreclosure_manual.csv"
+    summit_out = out_dir / f"{date_str}_Summit_foreclosure_manual.csv"
 
-    # write_datasift_csv writes to config.OUTPUT_DIR / filename so we
-    # override the destination path manually after writing.
-    # Simpler: just invoke the row-builder directly.
     from datasift_formatter import _build_row, DATASIFT_COLUMNS, _build_dm_notes
 
     def write_as_sift(records: list[NoticeData], path: Path) -> None:
@@ -374,14 +375,13 @@ def main() -> int:
     logger.info("Summit CSV: %s  (%d rows)", summit_out, len(summit))
 
     # ── OneDrive sync (default behavior) ──
-    # Push to /SiftStack/{date}/manual/ so the files show up alongside the
-    # automated Actor-run outputs in the user's synced OneDrive folder.
+    # Flat structure at /SiftStack/{date}/ — filename uniqueness from the
+    # date+county+type+kind pattern, no nested subfolders.
     try:
         from onedrive_uploader import sync_upload_files
-        date_str = datetime.now().strftime("%Y-%m-%d")
         sync_upload_files([
-            (stark_out,  f"SiftStack/{date_str}/manual/stark_foreclosures_manual.csv"),
-            (summit_out, f"SiftStack/{date_str}/manual/summit_foreclosures_manual.csv"),
+            (stark_out,  f"SiftStack/{date_str}/{stark_out.name}"),
+            (summit_out, f"SiftStack/{date_str}/{summit_out.name}"),
         ])
     except Exception as e:
         logger.warning("OneDrive sync failed (continuing): %s", e)

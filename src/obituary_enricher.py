@@ -41,6 +41,57 @@ MAX_ADDRESS_TEXT = 15000  # Larger limit for people search pages (CBC has 250+ r
 MAX_DOD_GAP_YEARS = 3
 
 
+# ── State-aware search context ────────────────────────────────────
+# Module-level state code used by search-query builders and LLM prompts.
+# Set by enrich_obituary_data() from the first notice's state before any
+# search runs. Defaults to "TN" for back-compat with the original
+# Knox/Blount pipeline. All notices within a single enrichment pass share
+# the same state (Actor runs are single-state), so module-level is safe.
+_CURRENT_STATE_CODE = "TN"
+
+
+_STATE_CODE_TO_NAME = {
+    "TN": "Tennessee",
+    "OH": "Ohio",
+    "AL": "Alabama",
+    "GA": "Georgia",
+    "NC": "North Carolina",
+    "SC": "South Carolina",
+    "KY": "Kentucky",
+    "VA": "Virginia",
+    "MI": "Michigan",
+    "IN": "Indiana",
+    "IL": "Illinois",
+    "WV": "West Virginia",
+    "PA": "Pennsylvania",
+    "FL": "Florida",
+    "TX": "Texas",
+}
+
+
+def _state_name() -> str:
+    """Return the full state name for the active enrichment context."""
+    return _STATE_CODE_TO_NAME.get(
+        _CURRENT_STATE_CODE.upper(), "Tennessee",
+    )
+
+
+def _state_code_lower() -> str:
+    """Return the 2-letter state code lowercased (for URL path segments)."""
+    return (_CURRENT_STATE_CODE or "TN").lower()
+
+
+def _set_enrichment_state(notices: list) -> None:
+    """Set module-level state context from the first notice that has a state."""
+    global _CURRENT_STATE_CODE
+    for n in notices:
+        st = getattr(n, "state", "") or ""
+        if st.strip():
+            _CURRENT_STATE_CODE = st.strip().upper()
+            return
+    _CURRENT_STATE_CODE = "TN"
+
+
 def _dod_sanity_check(dod_str: str, notice: "NoticeData") -> bool:
     """Reject obituary matches where DOD is implausibly far from the notice date.
 
@@ -215,12 +266,12 @@ OBITUARY_PROMPT = """\
 I have a property record with this owner information:
 - Owner name: {owner_name}
 - Property city: {city}
-- Property state: Tennessee
+- Property state: {state_name}
 - Property address: {address}
 
 Below is text from a potential obituary. Determine if this obituary is for the same person \
 as the property owner. Consider: name match (first + last name must match; middle name/initial \
-is bonus confirmation), location match (same city or county in Tennessee), and timeline \
+is bonus confirmation), location match (same city or county in {state_name}), and timeline \
 plausibility (death within last 5 years is typical for active foreclosure/tax sale records).
 
 Return a JSON object with these exact keys:
@@ -407,7 +458,12 @@ def _search_obituary(name: str, city: str, extra_terms: str = "") -> list[dict]:
     Returns list of {url, title, snippet} for obituary-domain results.
     """
     keyword = extra_terms if extra_terms else "obituary"
-    query = f'{name} {keyword} Tennessee' if not city else f'{name} {keyword} {city} Tennessee'
+    state_name = _state_name()
+    query = (
+        f'{name} {keyword} {state_name}'
+        if not city
+        else f'{name} {keyword} {city} {state_name}'
+    )
 
     try:
         results = DDGS().text(query, max_results=8, backend="google,duckduckgo,brave")
@@ -570,7 +626,7 @@ def _refetch_specific_obituary(
     """
     queries = [
         f'"{name}" obituary site:legacy.com',
-        f'"{name}" obituary {city} Tennessee "survived by"',
+        f'"{name}" obituary {city} {_state_name()} "survived by"',
     ]
 
     for query in queries:
@@ -657,11 +713,12 @@ def _search_survivors_targeted(
 
     Returns list of survivor dicts [{name, relationship}] or empty list.
     """
+    state_name = _state_name()
     queries = [
-        f'"{name}" "survived by" {city} Tennessee',
-        f'"{name}" "preceded in death" {city} Tennessee',
+        f'"{name}" "survived by" {city} {state_name}',
+        f'"{name}" "preceded in death" {city} {state_name}',
         f'"{name}" obituary wife OR husband OR son OR daughter {city}',
-        f'"{name}" funeral OR memorial service {city} Tennessee',
+        f'"{name}" funeral OR memorial service {city} {state_name}',
     ]
 
     all_snippets = []
@@ -769,22 +826,22 @@ ADDRESS_EXTRACT_PROMPT = """\
 Extract the current residential mailing address for this person from the web page text.
 
 Person: {name}
-Expected area: {city}, Tennessee (or nearby)
+Expected area: {city}, {state_name} (or nearby)
 
 Instructions:
 1. The page may list MULTIPLE people. Scan ALL result blocks to find the one that \
-best matches "{name}" in {city}, Tennessee.
+best matches "{name}" in {city}, {state_name}.
 2. Within that block, prefer the "Lives at" or "Current address" over "Used to live" addresses.
 3. If you find an exact name + state match, return it even if the city differs slightly \
-(people move within Tennessee).
-4. If multiple exact matches exist (common name), pick the Tennessee address closest \
+(people move within {state_name}).
+4. If multiple exact matches exist (common name), pick the {state_name} address closest \
 to {city}.
 5. If no confident match exists, return empty strings — do not guess.
 
 Return ONLY valid JSON with these exact keys:
 - "street": street address (e.g., "1234 Oak Street") — empty string if not found
 - "city": city name — empty string if not found
-- "state": 2-letter state code — "TN" if Tennessee
+- "state": 2-letter state code — "{state_code}" if {state_name}
 - "zip": 5-digit zip code — empty string if not found
 - "confidence": "high" if name+state match found, "medium" if likely match, "low" if uncertain
 
@@ -835,9 +892,10 @@ def _lookup_dm_address_web(name: str, city: str, api_key: str) -> dict | None:
     """
     # Targeted people search query
     site_filter = " OR ".join(f"site:{d}" for d in list(PEOPLE_SEARCH_DOMAINS)[:4])
+    state_name = _state_name()
     queries = [
-        f'"{name}" {city} Tennessee {site_filter}',
-        f'"{name}" Tennessee address {city}',
+        f'"{name}" {city} {state_name} {site_filter}',
+        f'"{name}" {state_name} address {city}',
     ]
 
     for query in queries:
@@ -861,9 +919,13 @@ def _lookup_dm_address_web(name: str, city: str, api_key: str) -> dict | None:
                 continue
 
             # LLM extraction
+            _state_code = _CURRENT_STATE_CODE.upper() or "TN"
+            _city_fb = "Knoxville" if _state_code == "TN" else ""
             prompt = ADDRESS_EXTRACT_PROMPT.format(
                 name=name,
-                city=city or "Knoxville",
+                city=city or _city_fb,
+                state_name=_state_name(),
+                state_code=_state_code,
                 page_text=page_text[:MAX_OBITUARY_TEXT],
             )
             try:
@@ -876,7 +938,7 @@ def _lookup_dm_address_web(name: str, city: str, api_key: str) -> dict | None:
                         return {
                             "street": street,
                             "city": parsed.get("city", ""),
-                            "state": parsed.get("state", "TN"),
+                            "state": parsed.get("state", _state_code),
                             "zip": parsed.get("zip", ""),
                         }
             except Exception as e:
@@ -902,12 +964,22 @@ def _build_people_search_urls(name: str, city: str) -> list[str]:
         return []
     first = parts[0].lower()
     last = parts[-1].lower()
-    city_clean = (city or "Knoxville").strip().lower().replace(" ", "-")
+    state_code = _state_code_lower()
+    city_fallback = "Knoxville" if state_code == "tn" else ""
+    city_clean = (city or city_fallback).strip().lower().replace(" ", "-")
+
+    # If we have no city at all (happens for OH decedents whose probates
+    # didn't resolve a property address), fall back to a state-only URL.
+    # CBC accepts state-level lookups for many names.
+    if not city_clean:
+        return [
+            f"https://www.cyberbackgroundchecks.com/people/{first}-{last}/{state_code}",
+        ]
 
     urls = [
         # CyberBackgroundChecks — shows full address history, phones, relatives
         f"https://www.cyberbackgroundchecks.com/people/"
-        f"{first}-{last}/{city_clean}-tn",
+        f"{first}-{last}/{city_clean}-{state_code}",
     ]
     return urls
 
@@ -1062,9 +1134,13 @@ def _extract_address_from_page(
     page_text: str, name: str, city: str, api_key: str
 ) -> dict | None:
     """Use Claude Haiku to extract a mailing address from page text."""
+    _state_code = _CURRENT_STATE_CODE.upper() or "TN"
+    _city_fb = "Knoxville" if _state_code == "TN" else ""
     prompt = ADDRESS_EXTRACT_PROMPT.format(
         name=name,
-        city=city or "Knoxville",
+        city=city or _city_fb,
+        state_name=_state_name(),
+        state_code=_state_code,
         page_text=page_text[:MAX_ADDRESS_TEXT],
     )
     try:
@@ -1077,7 +1153,7 @@ def _extract_address_from_page(
             return {
                 "street": street,
                 "city": parsed.get("city", ""),
-                "state": parsed.get("state", "TN"),
+                "state": parsed.get("state", _state_code),
                 "zip": parsed.get("zip", ""),
             }
     except Exception as e:
@@ -1535,6 +1611,7 @@ def _parse_obituary_with_llm(
     prompt = OBITUARY_PROMPT.format(
         owner_name=owner_name,
         city=city or "unknown",
+        state_name=_state_name(),
         address=address or "unknown",
         obituary_text=obituary_text[:MAX_OBITUARY_TEXT],
     )
@@ -1819,7 +1896,7 @@ def verify_heir_status(
     }
 
     results = _search_obituary(heir_name, city)
-    result["search_log"]["query"] = f"{heir_name} obituary {city} Tennessee"
+    result["search_log"]["query"] = f"{heir_name} obituary {city} {_state_name()}"
 
     if not results:
         # No search results at all — likely alive (no obituary exists online)
@@ -2142,6 +2219,15 @@ def enrich_obituary_data(
     if not api_key:
         logger.warning("No Anthropic API key — skipping obituary enrichment")
         return
+
+    # Set state context from notice batch so search-query builders + LLM
+    # prompts use the correct state name (e.g. "Ohio" vs "Tennessee").
+    # Actor runs are single-state so taking the first is fine.
+    _set_enrichment_state(notices)
+    logger.info(
+        "Obituary enrichment: state context = %s (%s)",
+        _CURRENT_STATE_CODE, _state_name(),
+    )
 
     # Build candidate list: notices with owner names to search
     # Tuple: (notice, raw_name, is_tax_name)
@@ -2476,10 +2562,13 @@ def enrich_obituary_data(
                             continue
 
                         search_name = names[0]
-                        city = notice.city.strip() or "Knoxville"
+                        _state_code = (notice.state or "TN").upper()
+                        city = notice.city.strip() or (
+                            "Knoxville" if _state_code == "TN" else ""
+                        )
 
                         result = await ancestry_enricher.lookup_deceased(
-                            page, name=search_name, city=city, state="TN"
+                            page, name=search_name, city=city, state=_state_code,
                         )
                         if result and result.get("confirmed_deceased"):
                             notice.owner_deceased = "yes"

@@ -26,7 +26,6 @@ doesn't block a daily run from producing Slack output.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 from pathlib import Path
@@ -47,7 +46,7 @@ GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 
 # Scopes we request on refresh. Must be a subset of what the one-time
 # OAuth consent granted.
-SCOPES = "Files.ReadWrite offline_access User.Read"
+SCOPES = "Files.ReadWrite.All offline_access User.Read"
 
 # Max size for Graph's simple PUT :/content upload. Above this you'd need
 # a createUploadSession. Our CSVs top out well under 100 KB, PDFs under

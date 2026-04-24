@@ -27,7 +27,7 @@ import httpx
 
 DEVICE_CODE_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/devicecode"
 TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
-SCOPES = "Files.ReadWrite offline_access User.Read"
+SCOPES = "Files.ReadWrite.All offline_access User.Read"
 
 
 def main() -> int:

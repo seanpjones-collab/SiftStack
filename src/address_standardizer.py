@@ -125,12 +125,18 @@ def standardize_addresses(
             metadata = candidate.metadata
             analysis = candidate.analysis
 
-            # Safety: reject non-TN results (bad match on out-of-state address)
-            if components and components.state_abbreviation and components.state_abbreviation != "TN":
+            # Safety: reject Smarty results that snapped to a different state
+            # than the notice's own state (bad match on out-of-state address).
+            # Previously hardcoded "TN" — now uses the notice's own state so
+            # OH records don't get rejected when Smarty correctly returns OH.
+            expected_state = (notice.state or "TN").upper()
+            if (components and components.state_abbreviation
+                    and components.state_abbreviation.upper() != expected_state):
                 logger.warning(
-                    "Smarty returned %s for '%s' -- keeping original",
+                    "Smarty returned %s for '%s' (expected %s) -- keeping original",
                     components.state_abbreviation,
                     notice.address,
+                    expected_state,
                 )
                 failed += 1
                 continue

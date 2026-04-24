@@ -675,15 +675,17 @@ async def actor_main() -> None:
             run_date = datetime.now().strftime("%Y-%m-%d")
 
             # OneDrive folder for this run. When the run is scoped to a
-            # single county (counties filter), append a county suffix so
-            # parallel per-county runs don't overwrite each other's CSVs
-            # at /SiftStack/{date}/. Unscoped runs (all counties) keep
-            # the flat /SiftStack/{date}/ path.
+            # single county and/or single notice type, append suffix(es) so
+            # parallel runs don't overwrite each other's CSVs at
+            # /SiftStack/{date}/. Unscoped runs keep the flat path.
             run_counties = (counties or [])
-            _county_suffix = ""
+            run_types = (types or [])
+            _suffix = ""
             if len(run_counties) == 1:
-                _county_suffix = f"/{run_counties[0]}"
-            run_folder = f"SiftStack/{run_date}{_county_suffix}"
+                _suffix += f"/{run_counties[0]}"
+            if len(run_types) == 1:
+                _suffix += f"/{run_types[0]}"
+            run_folder = f"SiftStack/{run_date}{_suffix}"
 
             if dp_candidates:
                 try:

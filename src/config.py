@@ -12,7 +12,12 @@ load_dotenv()
 
 # ── Paths ──────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-OUTPUT_DIR = PROJECT_ROOT / "output"
+# OUTPUT_DIR can be pointed outside the repo via the OUTPUT_DIR env var
+# (useful for landing CLI runs directly in a cloud-synced folder like
+# OneDrive: OUTPUT_DIR=C:\Users\SeanJones\OneDrive\SiftStack\output).
+# Defaults to ./output/ inside the repo when the env var is unset.
+_output_env = os.getenv("OUTPUT_DIR", "").strip()
+OUTPUT_DIR = Path(_output_env).expanduser() if _output_env else (PROJECT_ROOT / "output")
 LOG_DIR = PROJECT_ROOT / "logs"
 STATE_FILE = PROJECT_ROOT / "last_run.json"
 SEEN_IDS_FILE = PROJECT_ROOT / "seen_ids.json"
@@ -31,7 +36,7 @@ DROPBOX_POLL_INTERVAL = int(os.getenv("DROPBOX_POLL_INTERVAL", "900"))  # second
 DROPBOX_ROOT_FOLDER = os.getenv("DROPBOX_ROOT_FOLDER", "")  # root folder path in Dropbox, e.g. "/TN Public Notice"
 DROPBOX_STORAGE_WARN_PERCENT = 80  # warn when storage usage exceeds this %
 
-OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(exist_ok=True)
 
 # ── Credentials ────────────────────────────────────────────────────────

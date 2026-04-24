@@ -154,6 +154,20 @@
             "editor": "textarea",
             "isSecret": true
         },
+        "ms_graph_client_id": {
+            "title": "Microsoft Graph Client ID (OneDrive)",
+            "type": "string",
+            "description": "Azure AD App Registration Application (client) ID. Enables OneDrive upload of DataSift CSVs + Deep Prospecting PDFs. Paired with ms_graph_refresh_token. Leave empty to fall back to Apify KVS signed URLs.",
+            "editor": "textfield",
+            "isSecret": true
+        },
+        "ms_graph_refresh_token": {
+            "title": "Microsoft Graph Refresh Token (OneDrive)",
+            "type": "string",
+            "description": "Long-lived refresh token captured by running scripts/onedrive_auth.py once locally. Paired with ms_graph_client_id. Works as long as the actor runs at least once per 90 days (work/school account inactivity window).",
+            "editor": "textarea",
+            "isSecret": true
+        },
         "run_tracerfy": {
             "title": "Run Tracerfy Skip Trace",
             "type": "boolean",

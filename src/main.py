@@ -186,6 +186,8 @@ async def actor_main() -> None:
             "TRESTLE_API_KEY": actor_input.get("trestle_api_key", ""),
             "ALN_EMAIL": actor_input.get("aln_email", ""),
             "ALN_PASSWORD": actor_input.get("aln_password", ""),
+            "MS_GRAPH_CLIENT_ID": actor_input.get("ms_graph_client_id", ""),
+            "MS_GRAPH_REFRESH_TOKEN": actor_input.get("ms_graph_refresh_token", ""),
         }
         for key, val in _cred_map.items():
             if val:
@@ -665,6 +667,13 @@ async def actor_main() -> None:
                 except Exception as e:
                     Actor.log.warning("Per-record Trestle scoring failed: %s — continuing", e)
 
+            # OneDrive uploader — built lazily; None if creds not set.
+            # We reuse this for both the PDFs and the DataSift CSVs below
+            # so refresh token → access token happens once per run.
+            from onedrive_uploader import get_onedrive_client_from_env
+            onedrive = get_onedrive_client_from_env()
+            run_date = datetime.now().strftime("%Y-%m-%d")
+
             if dp_candidates:
                 try:
                     from report_generator import generate_record_pdf
@@ -678,9 +687,24 @@ async def actor_main() -> None:
                         key = pdf_path.name
                         with open(pdf_path, "rb") as f:
                             await kvs.set_value(key, f.read(), content_type="application/pdf")
-                        # Signed URL — works without an Apify API token.
-                        # get_public_url is async, MUST be awaited.
-                        url = await kvs.get_public_url(key)
+
+                        # Prefer OneDrive share link; fall back to KVS signed URL
+                        # if OneDrive is misconfigured or temporarily failing.
+                        url: Optional[str] = None
+                        if onedrive is not None:
+                            try:
+                                remote = f"SiftStack/{run_date}/reports/{pdf_path.name}"
+                                url, _ = await onedrive.upload_and_share(
+                                    pdf_path, remote,
+                                )
+                            except Exception as e:
+                                Actor.log.warning(
+                                    "OneDrive upload for %s failed (%s) — "
+                                    "falling back to Apify KVS link",
+                                    pdf_path.name, e,
+                                )
+                        if url is None:
+                            url = await kvs.get_public_url(key)
                         pdf_urls.append({"address": n.address, "url": url})
 
                     Actor.log.info("Generated %d deep prospecting PDFs (%d records skipped — no DP data)",
@@ -719,10 +743,12 @@ async def actor_main() -> None:
             elif drive_folder_id:
                 Actor.log.warning("google_drive_folder_id set but google_service_account_key missing — skipping Drive upload")
 
-            # ── DataSift CSVs → KVS (manual upload) ─────────────────
-            # Generate DataSift-formatted CSVs and save to Apify KVS
-            # for manual download + upload to DataSift (more reliable than
-            # automated Playwright upload in headless cloud containers).
+            # ── DataSift CSVs → OneDrive (primary) + KVS (fallback) ──
+            # Preferred path: upload to user's OneDrive, bidirectional sync
+            # puts a copy on their local disk automatically, Slack link
+            # points at OneDrive share URL (persistent, shareable).
+            # Fallback: Apify KVS signed URL (expires with run storage
+            # retention ~7d, and browser auto-downloads instead of viewing).
             datasift_csv_urls = []
             try:
                 from datasift_formatter import write_datasift_split_csvs
@@ -733,13 +759,34 @@ async def actor_main() -> None:
                     key = f"datasift_{info['label'].lower().replace(' ', '_')}.csv"
                     with open(info["path"], "rb") as f:
                         await kvs.set_value(key, f.read(), content_type="text/csv")
-                    # Signed public URL — works without an Apify API token.
-                    # get_public_url is async, MUST be awaited.
-                    url = await kvs.get_public_url(key)
+
+                    url: Optional[str] = None
+                    if onedrive is not None:
+                        try:
+                            remote = f"SiftStack/{run_date}/{key}"
+                            url, _ = await onedrive.upload_and_share(
+                                info["path"], remote,
+                            )
+                        except Exception as e:
+                            Actor.log.warning(
+                                "OneDrive upload for %s failed (%s) — "
+                                "falling back to Apify KVS link",
+                                key, e,
+                            )
+                    if url is None:
+                        url = await kvs.get_public_url(key)
+
                     datasift_csv_urls.append({"label": info["label"], "url": url, "records": info.get("count", "?")})
-                    Actor.log.info("DataSift CSV (%s) saved to KVS: %s", info["label"], key)
+                    Actor.log.info("DataSift CSV (%s) saved: %s", info["label"], key)
             except Exception as e:
                 Actor.log.error("DataSift CSV generation failed: %s", e)
+
+            # Release Graph HTTP client cleanly.
+            if onedrive is not None:
+                try:
+                    await onedrive.close()
+                except Exception:
+                    pass
 
             # ── Slack Notification ────────────────────────────────────
             elapsed_min = (_time() - pipeline_start) / 60

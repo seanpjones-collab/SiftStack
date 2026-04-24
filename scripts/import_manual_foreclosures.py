@@ -164,6 +164,18 @@ def load_stark_xlsx(path: Path, case_seen: set) -> list[NoticeData]:
             raw_addr = str(row[addr_idx] or "").strip() if addr_idx < len(row) else ""
             if not case_no or not raw_addr:
                 continue
+
+            # Court filter: CPC (Common Pleas Court) only. Municipal court
+            # cases (AMC=Alliance, CMC=Canton, MMC=Massillon) with "F" case
+            # codes in CJIS are small-claims consumer debt collections, not
+            # real-estate foreclosures. The automated stark_cjis_scraper
+            # filters these out; the manual xlsx pulls didn't.
+            court_code = ""
+            if court_idx is not None and court_idx < len(row) and row[court_idx]:
+                court_code = str(row[court_idx]).strip().upper()
+            if court_code and court_code != "CPC":
+                continue
+
             if case_no in case_seen:
                 continue
             case_seen.add(case_no)

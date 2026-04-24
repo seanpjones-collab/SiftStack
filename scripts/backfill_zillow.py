@@ -216,6 +216,26 @@ def main() -> int:
     logger.info("")
     logger.info("TOTAL: %d enriched, %d skipped, %d failed. Estimated cost: $%.2f",
                 totals[0], totals[1], totals[2], est_cost)
+
+    # ── OneDrive sync — mirror all touched CSVs so users see the
+    # enriched versions alongside the Actor-generated ones. Path mirrors
+    # the local output/ folder structure.
+    try:
+        from onedrive_uploader import sync_upload_files
+        from datetime import datetime as _dt
+        date_str = _dt.now().strftime("%Y-%m-%d")
+        # Build (local, remote) pairs preserving the output/* sub-path
+        out_dir = REPO / "output"
+        pairs = []
+        for path in TARGETS:
+            if not path.exists(): continue
+            rel = path.relative_to(out_dir)                    # e.g. manual_import/foo.csv
+            remote = f"SiftStack/{date_str}/{rel.as_posix()}"
+            pairs.append((path, remote))
+        sync_upload_files(pairs)
+    except Exception as e:
+        logger.warning("OneDrive sync failed (continuing): %s", e)
+
     return 0
 
 

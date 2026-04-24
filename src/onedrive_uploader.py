@@ -237,3 +237,52 @@ def get_onedrive_client_from_env(
         refresh_token=refresh_token,
         http_proxy=http_proxy,
     )
+
+
+def sync_upload_files(files: list, *, quiet: bool = False) -> list:
+    """Sync helper for CLI scripts. Uploads each (local_path, remote_path)
+    pair to OneDrive using env creds. Returns list of (remote_path, url)
+    for successful uploads. Silently skips if creds not configured.
+
+    Used by local scripts (import_manual_foreclosures, backfill_zillow)
+    to make OneDrive sync the default behavior — output goes to disk AND
+    to OneDrive in one step, no separate "upload" action required.
+
+    Args:
+        files: list of tuples (local_path: Path, remote_path: str).
+            remote_path is relative to OneDrive root (e.g.
+            "SiftStack/2026-04-24/manual/stark.csv").
+        quiet: suppress per-file log lines if True.
+    """
+    import asyncio
+    from pathlib import Path as _Path
+
+    client = get_onedrive_client_from_env()
+    if client is None:
+        if not quiet:
+            logger.info(
+                "OneDrive creds not set (MS_GRAPH_CLIENT_ID/REFRESH_TOKEN) "
+                "-- skipping OneDrive sync. Files remain on local disk only.",
+            )
+        return []
+
+    async def _run() -> list:
+        results: list = []
+        try:
+            for local, remote in files:
+                try:
+                    url, _ = await client.upload_and_share(
+                        _Path(local), str(remote),
+                    )
+                    if not quiet:
+                        logger.info("OneDrive: %s -> %s",
+                                    _Path(local).name, url)
+                    results.append((str(remote), url))
+                except Exception as exc:
+                    logger.warning("OneDrive upload failed for %s: %s",
+                                   local, exc)
+        finally:
+            await client.close()
+        return results
+
+    return asyncio.run(_run())

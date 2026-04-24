@@ -372,6 +372,20 @@ def main() -> int:
     write_as_sift(summit, summit_out)
     logger.info("Stark CSV:  %s  (%d rows)", stark_out, len(stark))
     logger.info("Summit CSV: %s  (%d rows)", summit_out, len(summit))
+
+    # ── OneDrive sync (default behavior) ──
+    # Push to /SiftStack/{date}/manual/ so the files show up alongside the
+    # automated Actor-run outputs in the user's synced OneDrive folder.
+    try:
+        from onedrive_uploader import sync_upload_files
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        sync_upload_files([
+            (stark_out,  f"SiftStack/{date_str}/manual/stark_foreclosures_manual.csv"),
+            (summit_out, f"SiftStack/{date_str}/manual/summit_foreclosures_manual.csv"),
+        ])
+    except Exception as e:
+        logger.warning("OneDrive sync failed (continuing): %s", e)
+
     logger.info("Upload both at app.reisift.io → Upload File → Add Data")
     return 0
 

@@ -674,6 +674,17 @@ async def actor_main() -> None:
             onedrive = get_onedrive_client_from_env()
             run_date = datetime.now().strftime("%Y-%m-%d")
 
+            # OneDrive folder for this run. When the run is scoped to a
+            # single county (counties filter), append a county suffix so
+            # parallel per-county runs don't overwrite each other's CSVs
+            # at /SiftStack/{date}/. Unscoped runs (all counties) keep
+            # the flat /SiftStack/{date}/ path.
+            run_counties = (counties or [])
+            _county_suffix = ""
+            if len(run_counties) == 1:
+                _county_suffix = f"/{run_counties[0]}"
+            run_folder = f"SiftStack/{run_date}{_county_suffix}"
+
             if dp_candidates:
                 try:
                     from report_generator import generate_record_pdf
@@ -693,7 +704,7 @@ async def actor_main() -> None:
                         url: Optional[str] = None
                         if onedrive is not None:
                             try:
-                                remote = f"SiftStack/{run_date}/reports/{pdf_path.name}"
+                                remote = f"{run_folder}/reports/{pdf_path.name}"
                                 url, _ = await onedrive.upload_and_share(
                                     pdf_path, remote,
                                 )
@@ -763,7 +774,7 @@ async def actor_main() -> None:
                     url: Optional[str] = None
                     if onedrive is not None:
                         try:
-                            remote = f"SiftStack/{run_date}/{key}"
+                            remote = f"{run_folder}/{key}"
                             url, _ = await onedrive.upload_and_share(
                                 info["path"], remote,
                             )

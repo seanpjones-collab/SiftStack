@@ -194,6 +194,30 @@ async def actor_main() -> None:
                 setattr(config, key, val)
                 os.environ[key] = val
 
+        # ── Hard requirement: OneDrive credentials ─────────────────
+        # OneDrive is the ONLY output destination for run artifacts.
+        # If creds aren't set, fail loud — no silent fallback to Apify
+        # KVS links (which expire with run retention and only work in
+        # the original user's browser session). Most common failure
+        # mode: schedule's runInput.body got out of sync with current
+        # input.cloud.json after a credential addition. Run
+        # `python scripts/sync_schedule_input.py --apply` to repair.
+        ms_id = os.environ.get("MS_GRAPH_CLIENT_ID", "").strip()
+        ms_token = os.environ.get("MS_GRAPH_REFRESH_TOKEN", "").strip()
+        if not ms_id or not ms_token:
+            Actor.log.error(
+                "FATAL: OneDrive credentials are required but missing. "
+                "Set ms_graph_client_id and ms_graph_refresh_token in the "
+                "Actor input (or schedule's runInput.body for scheduled "
+                "runs). The pipeline will not run without OneDrive output. "
+                "Repair the schedule by running: "
+                "python scripts/sync_schedule_input.py --apply"
+            )
+            await Actor.fail(
+                status_message="OneDrive credentials missing — see log",
+            )
+            return
+
         mode = actor_input.get("mode", "daily")
         counties = actor_input.get("counties") or None
         types = actor_input.get("types") or None
@@ -667,12 +691,45 @@ async def actor_main() -> None:
                 except Exception as e:
                     Actor.log.warning("Per-record Trestle scoring failed: %s — continuing", e)
 
-            # OneDrive uploader — built lazily; None if creds not set.
-            # We reuse this for both the PDFs and the DataSift CSVs below
-            # so refresh token → access token happens once per run.
+            # OneDrive uploader — required (validated up front, see hard
+            # check at start of actor_main). Reused for PDFs + DataSift CSVs
+            # so refresh-token → access-token happens once per run.
             from onedrive_uploader import get_onedrive_client_from_env
             onedrive = get_onedrive_client_from_env()
+            assert onedrive is not None, (
+                "OneDrive client unavailable despite credential validation"
+            )
             run_date = datetime.now().strftime("%Y-%m-%d")
+
+            # ── Retry wrapper: OneDrive uploads are mandatory ──
+            # No KVS-link fallback — Sean explicitly requires OneDrive URLs
+            # in Slack messages, never Apify KVS signed URLs (which expire
+            # with run retention and break for non-original viewers).
+            # 3 attempts × exponential backoff (2s, 4s, 8s).
+            async def _onedrive_upload_with_retry(local_path, remote_path, label):
+                last_exc = None
+                for attempt in range(1, 4):
+                    try:
+                        url, _ = await onedrive.upload_and_share(
+                            local_path, remote_path,
+                        )
+                        return url
+                    except Exception as exc:
+                        last_exc = exc
+                        if attempt < 3:
+                            wait = 2 ** attempt
+                            Actor.log.warning(
+                                "OneDrive upload for %s failed (attempt %d/3): "
+                                "%s — retrying in %ds",
+                                label, attempt, exc, wait,
+                            )
+                            await asyncio.sleep(wait)
+                Actor.log.error(
+                    "OneDrive upload for %s FAILED after 3 attempts: %s. "
+                    "File will be missing from the Slack notification.",
+                    label, last_exc,
+                )
+                return None
 
             # OneDrive folder for this run: flat structure under /SiftStack/{date}/.
             # Per-run uniqueness comes from the filename itself
@@ -696,24 +753,17 @@ async def actor_main() -> None:
                         with open(pdf_path, "rb") as f:
                             await kvs.set_value(key, f.read(), content_type="application/pdf")
 
-                        # Prefer OneDrive share link; fall back to KVS signed URL
-                        # if OneDrive is misconfigured or temporarily failing.
-                        url: Optional[str] = None
-                        if onedrive is not None:
-                            try:
-                                remote = f"{run_folder}/reports/{pdf_path.name}"
-                                url, _ = await onedrive.upload_and_share(
-                                    pdf_path, remote,
-                                )
-                            except Exception as e:
-                                Actor.log.warning(
-                                    "OneDrive upload for %s failed (%s) — "
-                                    "falling back to Apify KVS link",
-                                    pdf_path.name, e,
-                                )
-                        if url is None:
-                            url = await kvs.get_public_url(key)
-                        pdf_urls.append({"address": n.address, "url": url})
+                        # OneDrive only — no KVS fallback per the bright-line
+                        # rule that Slack must never carry Apify KVS links.
+                        # If the upload fails after 3 retries, the PDF is
+                        # omitted from the Slack list (still saved in KVS for
+                        # debugging, but not surfaced to the user).
+                        remote = f"{run_folder}/reports/{pdf_path.name}"
+                        url = await _onedrive_upload_with_retry(
+                            pdf_path, remote, pdf_path.name,
+                        )
+                        if url is not None:
+                            pdf_urls.append({"address": n.address, "url": url})
 
                     Actor.log.info("Generated %d deep prospecting PDFs (%d records skipped — no DP data)",
                                    len(pdf_urls), total - len(dp_candidates))
@@ -751,47 +801,40 @@ async def actor_main() -> None:
             elif drive_folder_id:
                 Actor.log.warning("google_drive_folder_id set but google_service_account_key missing — skipping Drive upload")
 
-            # ── DataSift CSVs → OneDrive (primary) + KVS (fallback) ──
-            # Preferred path: upload to user's OneDrive, bidirectional sync
-            # puts a copy on their local disk automatically, Slack link
-            # points at OneDrive share URL (persistent, shareable).
-            # Fallback: Apify KVS signed URL (expires with run storage
-            # retention ~7d, and browser auto-downloads instead of viewing).
+            # ── DataSift CSVs → OneDrive ──
+            # OneDrive is the sole link destination for Slack. Files are
+            # also kept in KVS for debugging if you ever need to pull them
+            # via the Apify console, but those URLs are never surfaced.
             datasift_csv_urls = []
             try:
                 from datasift_formatter import write_datasift_split_csvs
 
                 # Filename stem: {date}_{County}_{type} derived from the
-                # notice batch's shared metadata (e.g. single-county runs
-                # get named by county). Keeps files uniquely identifiable
-                # when multiple parallel runs land in the same OneDrive folder.
+                # notice batch's shared metadata. Keeps files uniquely
+                # identifiable when multiple runs share a date folder.
                 csv_infos = write_datasift_split_csvs(notices)
                 kvs = await Actor.open_key_value_store()
                 for info in csv_infos:
-                    # Use the actual output filename (not the generic "dms.csv")
-                    # so KVS + OneDrive match what's on disk.
                     key = Path(info["path"]).name
                     with open(info["path"], "rb") as f:
                         await kvs.set_value(key, f.read(), content_type="text/csv")
 
-                    url: Optional[str] = None
-                    if onedrive is not None:
-                        try:
-                            remote = f"SiftStack/{run_date}/{key}"
-                            url, _ = await onedrive.upload_and_share(
-                                info["path"], remote,
-                            )
-                        except Exception as e:
-                            Actor.log.warning(
-                                "OneDrive upload for %s failed (%s) — "
-                                "falling back to Apify KVS link",
-                                key, e,
-                            )
-                    if url is None:
-                        url = await kvs.get_public_url(key)
-
-                    datasift_csv_urls.append({"label": info["label"], "url": url, "records": info.get("count", "?")})
-                    Actor.log.info("DataSift CSV (%s) saved: %s", info["label"], key)
+                    url = await _onedrive_upload_with_retry(
+                        info["path"], f"SiftStack/{run_date}/{key}", key,
+                    )
+                    if url is not None:
+                        datasift_csv_urls.append({
+                            "label": info["label"],
+                            "url": url,
+                            "records": info.get("count", "?"),
+                        })
+                        Actor.log.info("DataSift CSV (%s) saved: %s", info["label"], key)
+                    else:
+                        Actor.log.error(
+                            "DataSift CSV (%s) MISSING from Slack — OneDrive "
+                            "upload failed. Pull from local disk or Dataset.",
+                            info["label"],
+                        )
             except Exception as e:
                 Actor.log.error("DataSift CSV generation failed: %s", e)
 

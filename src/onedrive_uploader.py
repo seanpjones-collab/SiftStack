@@ -285,4 +285,13 @@ def sync_upload_files(files: list, *, quiet: bool = False) -> list:
             await client.close()
         return results
 
-    return asyncio.run(_run())
+    # If we're already inside a running event loop (e.g. caller is async),
+    # asyncio.run() raises. Run on a worker thread in that case so this
+    # helper stays safe to call from both sync and async contexts.
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(_run())
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        return ex.submit(asyncio.run, _run()).result()

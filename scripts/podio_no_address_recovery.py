@@ -49,6 +49,27 @@ OUTPUT_DIR = REPO / "output" / "podio_migration"
 RECOVERED_CSV = OUTPUT_DIR / "podio_no_address_recovered.csv"
 PENDING_CSV = OUTPUT_DIR / "podio_no_address_pending.csv"
 LOG_CSV = OUTPUT_DIR / "podio_no_address_recovery_log.csv"
+EXCLUDED_CSV = OUTPUT_DIR / "podio_no_address_excluded.csv"
+
+# Records that should never make it into Sift — internal/test/vendor placeholders.
+# Match is case-insensitive and applies to (first, last) name pair.
+def _is_excluded_name(first: str, last: str) -> bool:
+    f = (first or "").strip().lower()
+    l = (last or "").strip().lower()
+    full = f"{f} {l}".strip()
+    # Test/dev records
+    if f == "crecentech" and l == "test":
+        return True
+    # Vendor placeholders ("Property Leads Live" was a lead source label)
+    if f == "property" and l == "leads live":
+        return True
+    # Generic unknown-caller placeholders
+    if f.startswith("unknown") or full.startswith("unknown name"):
+        return True
+    # Rainmaker is a novation-deal processing vendor — their employees aren't leads
+    if f == "rainmaker":
+        return True
+    return False
 
 
 # ── Phone normalization ─────────────────────────────────────────────
@@ -306,10 +327,16 @@ def main():
 
     recovered: list[dict] = []
     pending: list[dict] = []
+    excluded: list[dict] = []
     log_rows: list[dict] = []
     name_recovery_count = 0
 
     for row in no_addr_rows:
+        # Drop internal/test/vendor placeholder records before we even attempt
+        # to match. These shouldn't end up in Sift attached to any property.
+        if _is_excluded_name(row.get("Owner First Name"), row.get("Owner Last Name")):
+            excluded.append(row)
+            continue
         # Walk all phone fields on the no-address record
         candidate_phones = []
         for i in range(1, 10):
@@ -396,12 +423,14 @@ def main():
 
     write_csv(RECOVERED_CSV, recovered, no_addr_fields)
     write_csv(PENDING_CSV, pending, no_addr_fields)
+    write_csv(EXCLUDED_CSV, excluded, no_addr_fields)
     write_csv(LOG_CSV, log_rows, list(log_rows[0].keys()) if log_rows else [])
 
     logger.info("─" * 60)
     logger.info("Total no-address records:   %d", len(no_addr_rows))
     logger.info("Recovered with address:     %d  → %s", len(recovered), RECOVERED_CSV.name)
     logger.info("Still pending (no match):   %d  → %s", len(pending), PENDING_CSV.name)
+    logger.info("Excluded (vendor/test):     %d  → %s", len(excluded), EXCLUDED_CSV.name)
     logger.info("Names backfilled:           %d (across both buckets)", name_recovery_count)
     logger.info("Per-record log:             %s", LOG_CSV.name)
     logger.info("Sources used: Sift=%d phones, smrtDialer=%d phones",

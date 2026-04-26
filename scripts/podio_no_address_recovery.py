@@ -135,6 +135,56 @@ def _detect_columns(fieldnames: list[str]) -> dict:
     }
 
 
+def _name_cols_for_phone(phone_col: str, fieldnames: list[str]) -> tuple[str | None, str | None]:
+    """Return (first_name_col, last_name_col) most appropriate for this phone column.
+
+    Strips phone-related suffixes from `phone_col` to recover a prefix
+    ("PR Ph Number" → "PR"), then looks for `{prefix} First Name` /
+    `{prefix} Last Name`. Falls back to generic columns if no prefix match.
+
+    Examples:
+      "PR Ph Number"     → ("PR First Name", "PR Last Name")
+      "Attorney Ph Number" → ("Attorney First Name", "Attorney Last Name")
+      "Phone 1"          → ("First Name", "Last Name")  (generic)
+      "Phone1_Number"    → ("FirstName", "LastName") or ("First Name", "Last Name")
+    """
+    prefix = phone_col
+    suffix_patterns = [
+        r"\s*ph(?:one)?\s*number\s*$",   # "Ph Number", "Phone Number"
+        r"\s*phone\s*\d*\s*$",            # "Phone 1", "Phone1"
+        r"_?number\s*$",                   # "_Number", " Number"
+        r"\s*phone\s*$",
+        r"\s*cell(?:\s*phone)?\s*$",
+        r"\s*mobile(?:\s*phone)?\s*$",
+    ]
+    for pat in suffix_patterns:
+        prefix = re.sub(pat, "", prefix, flags=re.IGNORECASE)
+    prefix = prefix.strip()
+
+    def find_exact(*candidates: str) -> str | None:
+        for cand in candidates:
+            for col in fieldnames:
+                if col and col.lower() == cand.lower():
+                    return col
+        return None
+
+    # Prefix-based pair (e.g. "PR First Name" / "PR Last Name")
+    if prefix:
+        first = find_exact(f"{prefix} First Name", f"{prefix} FirstName")
+        last  = find_exact(f"{prefix} Last Name",  f"{prefix} LastName")
+        if first and last:
+            return (first, last)
+
+    # Generic fallback. Priority: Owner > Recipient > generic > FirstName-style
+    first = find_exact("Owner First Name", "OwnerFirstName",
+                       "Recipient First Name", "RecipientFirstName",
+                       "First Name", "FirstName")
+    last  = find_exact("Owner Last Name", "OwnerLastName",
+                       "Recipient Last Name", "RecipientLastName",
+                       "Last Name", "LastName")
+    return (first, last)
+
+
 def build_index_from_rows(
     rows: list[dict], fieldnames: list[str], source_label: str,
 ) -> dict[str, dict]:
@@ -157,21 +207,32 @@ def build_index_from_rows(
             return ""
         return str(v).strip()
 
+    # Pre-compute name pair per phone column so each match knows which
+    # First/Last to grab (PR phone → PR name, Attorney phone → Attorney name).
+    name_cols_per_phone: dict[str, tuple[str | None, str | None]] = {
+        pcol: _name_cols_for_phone(pcol, fieldnames) for pcol in cols["phones"]
+    }
+
     index: dict[str, dict] = {}
     for row in rows:
-        addr = {
+        base_addr = {
             "street": cell(row, cols["street"]),
             "city":   cell(row, cols["city"]),
             "state":  cell(row, cols["state"]),
             "zip":    cell(row, cols["zip"]),
             "_source_label": source_label,
         }
-        if not (addr["street"] or addr["city"] or addr["zip"]):
+        if not (base_addr["street"] or base_addr["city"] or base_addr["zip"]):
             continue
         for pcol in cols["phones"]:
             np = norm_phone(row.get(pcol))
-            if np:
-                index.setdefault(np, addr)
+            if not np:
+                continue
+            first_col, last_col = name_cols_per_phone[pcol]
+            entry = dict(base_addr)
+            entry["first_name"] = cell(row, first_col)
+            entry["last_name"]  = cell(row, last_col)
+            index.setdefault(np, entry)
     logger.info("[%s] indexed %d unique phone→address mappings", source_label, len(index))
     return index
 
@@ -246,6 +307,7 @@ def main():
     recovered: list[dict] = []
     pending: list[dict] = []
     log_rows: list[dict] = []
+    name_recovery_count = 0
 
     for row in no_addr_rows:
         # Walk all phone fields on the no-address record
@@ -270,6 +332,34 @@ def main():
                 match_phone = np
                 break
 
+        # Backfill name from the matched source if Podio row was missing it
+        # OR has the literal "No Name" placeholder. Don't overwrite real names.
+        row = dict(row)
+        original_first = (row.get("Owner First Name") or "").strip()
+        original_last  = (row.get("Owner Last Name") or "").strip()
+        # Treat ("No","Name") and ("","") as placeholders; anything else is real.
+        is_placeholder_name = (
+            (not original_first and not original_last)
+            or (original_first.lower() == "no" and original_last.lower() == "name")
+        )
+        recovered_first = ""
+        recovered_last  = ""
+        if match and is_placeholder_name:
+            if match.get("first_name"):
+                recovered_first = match["first_name"]
+                row["Owner First Name"] = recovered_first
+            if match.get("last_name"):
+                recovered_last = match["last_name"]
+                row["Owner Last Name"] = recovered_last
+            if recovered_first or recovered_last:
+                name_recovery_count += 1
+                # If we replaced a placeholder, clear the other field if blank too
+                # (so we don't end up with First="Susan" / Last="Name")
+                if is_placeholder_name and recovered_first and not recovered_last:
+                    row["Owner Last Name"] = ""
+                if is_placeholder_name and recovered_last and not recovered_first:
+                    row["Owner First Name"] = ""
+
         log_rows.append({
             "Owner First Name": row.get("Owner First Name", ""),
             "Owner Last Name": row.get("Owner Last Name", ""),
@@ -280,15 +370,15 @@ def main():
             "Recovered City":   match["city"] if match else "",
             "Recovered State":  match["state"] if match else "",
             "Recovered ZIP":    match["zip"] if match else "",
+            "Recovered First Name": recovered_first,
+            "Recovered Last Name":  recovered_last,
         })
 
         if match and match["street"]:
-            row = dict(row)
             row["Property Street Address"] = match["street"]
             row["Property City"] = match["city"]
             row["Property State"] = match["state"]
             row["Property ZIP Code"] = match["zip"]
-            # Tag origin: address-recovered-sift  OR  address-recovered-smrtdialer
             origin = "sift" if match_source == "Sift" else "smrtdialer"
             existing_tags = row.get("Tags", "")
             recovery_tag = f"address-recovered-{origin}"
@@ -312,6 +402,7 @@ def main():
     logger.info("Total no-address records:   %d", len(no_addr_rows))
     logger.info("Recovered with address:     %d  → %s", len(recovered), RECOVERED_CSV.name)
     logger.info("Still pending (no match):   %d  → %s", len(pending), PENDING_CSV.name)
+    logger.info("Names backfilled:           %d (across both buckets)", name_recovery_count)
     logger.info("Per-record log:             %s", LOG_CSV.name)
     logger.info("Sources used: Sift=%d phones, smrtDialer=%d phones",
                 len(sift_index), len(smrt_index))

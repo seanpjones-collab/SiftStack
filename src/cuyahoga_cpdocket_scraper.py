@@ -212,8 +212,22 @@ class CuyahogaCpDocketClient:
     async def _pass_tos_gate(self) -> None:
         """Navigate Search.aspx → click Foreclosure Search → agree to TOS.
 
-        Post-condition: self._page is on Search.aspx with session cookie set
-        and the foreclosure-radio ready to click.
+        Post-condition: self._page is on Search.aspx with the TOS-accepted
+        session cookie set and the foreclosure-radio ready to click.
+
+        Why we force a YES click even when the server seems to skip TOS:
+          The previous "TOS already accepted (proxy IP reuse)" branch
+          (which short-circuited when the link click left us on Search.aspx
+          without redirecting through TOS.aspx) was wrong. Three days of
+          live logs (4/26-4/28) show every short-circuit attempt failing —
+          the radio button is clickable but its AJAX postback silently
+          rejects, so the date inputs never render. Only attempts that
+          actually clicked YES on TOS.aspx ever produced a working form.
+          The takeaway: the radio's postback handler needs the
+          TOS-accepted session state, and the YES click is the only thing
+          that sets it. If the link click doesn't surface TOS.aspx (which
+          happens often under residential-proxy IP reuse), we fall through
+          to a direct GET on /TOS.aspx and click YES from there.
         """
         page = self._page
         assert page is not None
@@ -232,30 +246,53 @@ class CuyahogaCpDocketClient:
             raise CuyahogaCpDocketError(
                 f"Search.aspx missing 'Foreclosure Search' link: {exc}"
             ) from exc
-        await page.wait_for_load_state("domcontentloaded")
-        await page.wait_for_timeout(700)
 
-        # The TOS gate is shown once per session. When running through a
-        # residential proxy, the outbound IP has often already accepted TOS
-        # for another tenant and cpdocket routes us straight to the
-        # foreclosure form on Search.aspx — no TOS.aspx in the chain. That's
-        # fine; treat it as "TOS already accepted" and continue.
-        current_url = page.url or ""
-        if "TOS.aspx" in current_url:
-            logger.info("cpdocket: accepting TOS click-through")
-            await page.click(TOS_YES_BUTTON)
-            await page.wait_for_load_state("domcontentloaded")
-            await page.wait_for_timeout(1_100)
-            if "Search.aspx" not in (page.url or ""):
-                raise CuyahogaCpDocketError(
-                    f"Unexpected page after TOS accept: {page.url}"
-                )
-        elif "Search.aspx" in current_url:
-            logger.info("cpdocket: TOS already accepted for this session "
-                        "(proxy IP reuse) — proceeding to foreclosure form")
-        else:
+        # Wait for either a navigation to TOS.aspx OR a settled load on
+        # whatever page we ended up on. wait_for_url is more deterministic
+        # than wait_for_load_state + sleep when the navigation is in flight.
+        try:
+            await page.wait_for_url("**/TOS.aspx", timeout=8_000)
+        except Exception:
+            # No navigation to TOS.aspx within 8s — server let us through
+            # to Search.aspx. We still need TOS-accepted state for the
+            # radio's AJAX postback to work, so force it via direct GET.
+            pass
+        await page.wait_for_load_state("domcontentloaded")
+        await page.wait_for_timeout(500)
+
+        if "TOS.aspx" not in (page.url or ""):
+            logger.info(
+                "cpdocket: link click did not surface TOS.aspx (URL=%s) — "
+                "forcing direct GET to set session state",
+                page.url,
+            )
+            await page.goto(TOS_URL, wait_until="domcontentloaded",
+                            timeout=PAGE_NAV_TIMEOUT_MS)
+            await page.wait_for_timeout(700)
+
+        if "TOS.aspx" not in (page.url or ""):
+            # Even the direct GET bounced — server may have changed
+            # behavior. Proceed and let the date-inputs check downstream
+            # detect any breakage so the outer 5-attempt retry kicks in.
+            logger.warning(
+                "cpdocket: /TOS.aspx unreachable (URL=%s) — proceeding "
+                "without explicit YES click; expect possible form breakage",
+                page.url,
+            )
+            return
+
+        logger.info("cpdocket: clicking YES on TOS click-through")
+        try:
+            await page.click(TOS_YES_BUTTON, timeout=10_000)
+        except Exception as exc:
             raise CuyahogaCpDocketError(
-                f"Unexpected page after Foreclosure Search click: {current_url}"
+                f"TOS.aspx YES button not clickable: {exc}"
+            ) from exc
+        await page.wait_for_load_state("domcontentloaded")
+        await page.wait_for_timeout(1_100)
+        if "Search.aspx" not in (page.url or ""):
+            raise CuyahogaCpDocketError(
+                f"Unexpected page after TOS accept: {page.url}"
             )
 
     async def _reset_to_search_form(self) -> None:

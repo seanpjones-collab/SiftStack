@@ -6,15 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **SiftStack** — Full-stack real estate investing operations platform built around DataSift.ai CRM. Covers the entire REI business lifecycle:
 
-1. **Data Acquisition:** Web scraping tnpublicnotice.com (foreclosures, tax sales, probates), scanned PDF import, courthouse terminal photo import (probate, eviction, code violations, divorce), Dropbox auto-polling
-2. **Enrichment Pipeline:** 10+ steps — Smarty address standardization, Zillow property data, Knox County Tax API, obituary/heir research, Ancestry.com SSDI, Tracerfy skip trace, Trestle phone scoring, entity research
+1. **Data Acquisition:** Ohio court dockets (Cuyahoga cpdocket + DLN, Summit clerkweb + ALN, Stark CJIS + probate portal) as primary; TN web scraping of tnpublicnotice.com retained but disabled; scanned PDF import, courthouse terminal photo import (probate, eviction, code violations, divorce), Dropbox auto-polling
+2. **Enrichment Pipeline:** 10+ steps — Smarty address standardization (state-aware), Zillow property data, Knox Tax API (TN-only), OH probate property-address lookup (Cuyahoga MyPlace + Stark IasWorld), obituary/heir research (state-aware queries + prompts), Ancestry.com SSDI, Tracerfy skip trace, Trestle phone scoring, entity research
 3. **Deal Analysis:** Comparable sales (Two-Bucket ARV), rehab estimation (4-tier room-by-room), deal analyzer (MAO/ROI/financing scenarios)
 4. **Market Intelligence:** Zip code scoring, Market Finder reports, cash buyer list building, investor portfolio analysis
 5. **CRM Automation:** DataSift upload, 26 TCA sequence templates, 12 niche sequential marketing presets, filter preset management, SiftMap sold property tagging
 6. **Lead Management:** 4 Pillars of Motivation auto-qualification, STABM daily routine, pipeline reporting, deep prospecting (4-level framework)
-7. **Operations:** Acquisition playbook generator (SOPs, scripts, checklists), Slack/Discord notifications, Google Drive upload, Apify Actor deployment
+7. **Operations:** Acquisition playbook generator (SOPs, scripts, checklists), Slack/Discord notifications, OneDrive upload (primary) / Apify KVS (fallback), Apify Actor deployment with residential-proxy routing
 
-Currently focused on Knox and Blount counties, Tennessee.
+**Current operation:** Ohio — Cuyahoga, Summit, Stark counties, foreclosure + probate (6 scrapers shipped 2026-04-22, pipeline live in Apify daily 9 AM ET). TN (Knox/Blount) code retained behind an empty `SAVED_SEARCHES` list for easy re-enable.
 
 8. **REI Skill Library:** 13 Claude Co-Work skill files (`.skill`/`.plugin` ZIPs) for distribution to DataSift community via [learn.datasift.ai/claude-skills-rei](https://learn.datasift.ai/claude-skills-rei). Skills teach Claude specific REI workflows when uploaded to Co-Work sessions or Projects.
 
@@ -73,10 +73,17 @@ All source files are in `src/` and imports assume `src/` is the working director
 - **image_utils.py** — Shared OCR utilities used by both `pdf_importer.py` and `photo_importer.py`. Exports `fix_rotation()` (Tesseract OSD) and `ocr_page(image, psm)` with configurable page segmentation mode. Handles Tesseract binary detection.
 - **photo_importer.py** — Courthouse phone photo import. OpenCV preprocessing chain (EXIF transpose → blur check → bilateral filter → perspective correction → Otsu threshold) → Tesseract OCR (PSM 4) → LLM parsing → NoticeData. Supports all 7 notice types.
 - **dropbox_watcher.py** — Cursor-based Dropbox folder polling. Downloads new photos, resolves county + notice_type from folder path (`/Knox/eviction/photo.jpg`), processes through photo_importer, deletes from Dropbox after success. State persisted to `dropbox_state.json` + `photo_state.json`.
-- **report_generator.py** — Generates per-record PDF deep prospecting reports using reportlab. Includes property summary, signing chain with phone tiers, valuation, deceased owner detection. Output to `output/reports/`.
+- **report_generator.py** — Generates per-record PDF deep prospecting reports using reportlab. Includes property summary, signing chain with phone tiers, valuation, deceased owner detection. Output to `output/reports/{YYYY-MM-DD}/` with unique per-record slugs (decedent name + case_no when no address).
 - **extract_market_finder.py** — Playwright automation to extract ALL ZIP code + neighborhood data from DataSift Market Finder. Handles styled-component dropdowns, pagination (20 rows/page), Beamer popup dismissal. Outputs JSON. See "Market Finder Extraction Patterns" below.
 - **market_analyzer.py** — ZIP code scoring engine. 6-factor weighted composite (Distress 30%, Value 20%, Equity 15%, Tax Delinquency 15%, Competition 10%, DOM 10%). Grades A/B/C/D, budget allocation across top ZIPs. Reads from scraped notice CSVs in `output/`.
-- **drive_uploader.py** — Google Drive upload via service account. `upload_file()` (generic, returns webViewLink) and `upload_csv()` (CSV-specific, returns file ID).
+- **drive_uploader.py** — Google Drive upload via service account. **Deprecated for the daily Actor run** (OneDrive is now primary); kept for ad-hoc use.
+- **onedrive_uploader.py** — Microsoft Graph API client (delegated auth via long-lived refresh token, no client secret — public-client flow). `PUT :/content` simple upload, `createLink` with anonymous scope for Slack-safe share URLs. Primary storage for Actor outputs; Apify KVS signed URLs are fallback on any failure. Env vars: `MS_GRAPH_CLIENT_ID`, `MS_GRAPH_REFRESH_TOKEN`. One-time setup via `scripts/onedrive_auth.py` (device-code OAuth). OneDrive path layout: `/SiftStack/{YYYY-MM-DD}[/{County}[/{type}]]/datasift_dms.csv` — single-county runs get a `{County}` segment and single-type runs get an additional `{type}` segment so parallel county-scoped backfills don't collide.
+- **oh_dispatcher.py** — `scrape_ohio_all()` fans out to the 6 OH adapters serially in deterministic order (asyncio.to_thread wraps sync scrapers). One failing scraper logs and continues — morning run doesn't die because of one county.
+- **oh_property_lookup.py** — Fills missing property addresses on OH probate records. Cuyahoga: GET `myplace.cuyahogacounty.gov/MyPlaceService.svc/SingleSearchOwner/` (public WCF JSON, no auth). Stark: POST TOS accept at `realestate.starkcountyohio.gov/Search/Disclaimer.aspx` → POST `commonsearch.aspx?mode=realprop` → GET `Datalet.aspx` for city+zip (IasWorld / Tyler Technologies, session lazy-initialised once per run). Both search by last name only, filter client-side by decedent-name token overlap ≥ 0.6, try maiden-name fallback. Routes through proxy_config when proxy_url is set. Live hit rates: Cuyahoga 62% (46/74), Stark 22% (8/35) — misses are genuinely non-owning decedents (renters, nursing home, pre-death transfers), no false positives at 0.6 threshold. Summit probate needs no lookup (CourtView already emits addresses).
+- **proxy_config.py** — Single source of truth for Apify RESIDENTIAL (US-only) proxy routing. Shaped helpers for Playwright, `requests.Session`, and `urllib.request.install_opener`. Every HTTP call from every OH scraper routes through this in Actor runs. **Local `apify run` is blocked by the "Proxy external access" account gate** — cloud runs via `apify push` work cleanly. Proxy-IP receipt logged on every run via httpbin.org/ip.
+- **scripts/onedrive_auth.py** — One-time device-code OAuth helper. Prints a code, user enters at microsoft.com/devicelogin, script polls + captures refresh_token (long-lived: 90d work-account inactivity, 24mo personal).
+- **scripts/import_manual_foreclosures.py** — One-shot reader for Sean's pre-automation xlsx/csv dumps. Converts to DataSift 41-column CSV with Smarty enrichment. **For Stark, applies CPC-only court-code filter** — municipal court (AMC/Alliance, CMC/Canton, MMC/Massillon) "F" cases are small-claims consumer debt, NOT real-estate foreclosures. Only Common Pleas (CPC) is the target market.
+- **scripts/backfill_zillow.py** — One-shot Zillow backfill for existing CSVs. Creates `*.pre-zillow.csv` backup before rewriting, skips rows where Estimated Value is already populated (avoid double-billing on retries), 0.15s polite delay between calls (~6 req/sec), logs running cost estimate every 10 records. Hit rates observed: manual files 69-77%, scraped backfills 34-59% (Zillow indexing lag on Day-0 filings). Use only for historical catchup; `property_enricher` already runs in the daily pipeline.
 
 ## Site-Specific Details
 
@@ -89,7 +96,35 @@ The site is **ASP.NET WebForms** — all navigation uses `__doPostBack()` with V
 8 searches defined in `config.py` as `SAVED_SEARCHES`. Each maps to an exact dropdown option name on the Smart Search dashboard:
 - Knox & Blount × (Foreclosure V2, Tax Sale V2, Tax Delinquent V2, Probate V2)
 
-Filterable via `--counties` and `--types` CLI args (comma-separated, or omit for all).
+**`SAVED_SEARCHES` is currently empty** (TN disabled 2026-04-22). OH counties live in `OHIO_COUNTIES = ("Cuyahoga", "Summit", "Stark")`. Daily runs route through `oh_dispatcher.scrape_ohio_all()`. Filterable via `--counties` and `--types` CLI args (comma-separated, or omit for all).
+
+## Ohio Pipeline (current primary)
+
+**6 scrapers, 3 counties × 2 notice types** — all shipped 2026-04-22 and running daily in Apify at 9 AM ET.
+
+| County | Foreclosure | Probate |
+|---|---|---|
+| Cuyahoga | `cuyahoga_cpdocket_scraper.py` (day-0) + `dln_scraper.py` (service-by-pub) unified via `cuyahoga_foreclosure_scraper.py` (dedup by canonical parcel ID) | `cuyahoga_probate_scraper.py` via DLN `/wp-json/dln/v1/data-table?type=probate` (direct portal has no date filter, unusable as primary) |
+| Summit | `summit_clerk_scraper.py` (day-0) + `aln_scraper.py` (service-by-pub) unified via `summit_foreclosure_scraper.py` (dedup by normalized CV-YYYY-MM-NNNN) | `summit_probate_scraper.py` via CourtView eServices (Apache Wicket, Playwright-only) |
+| Stark | `stark_cjis_scraper.py` (CPC-only, filters AMC/CMC/MMC muni consumer debt) | `stark_probate_scraper.py` via Classic ASP portal at `probate.co.stark.oh.us` (HTTP-only, sequential integer case numbers, walk DOWN from high watermark) |
+
+### Apify runtime
+- **Residential proxy required for every OH HTTP call** — `proxy_config.py` wraps Playwright / requests / urllib. Local `apify run` is blocked by the "Proxy external access" account gate; cloud `apify push` works.
+- **Per-scraper KVS catch-up windows** — each scraper tracks `last_successful_{county}_{type}`, scrapes `[last + 1, yesterday]`. Failed scraper holds its date; next run re-attempts the window. Daily cadence = 1 day.
+- **Retry wrappers** on Playwright ASP.NET scrapers (cpdocket, clerkweb) — up to 5 attempts with fresh browser context + fresh proxy tunnel. Stark CJIS retries on 403/405/429 WAF codes. ALN login retries on flaky PHP + widened logged-in-state detection.
+- **Slack links use OneDrive share URLs** (anonymous scope, click-free). Apify KVS `get_public_url()` is **async — must be awaited**; fallback path uses signed KVS URLs when OneDrive upload fails.
+
+### OH probate property-address gap
+Cuyahoga + Stark probate records emit with `decedent_name` but no property address; `oh_property_lookup.lookup_ohio_decedent_properties()` fills the gap (see file description above). Summit probate doesn't need it — CourtView case-detail pages include property address at Day 0.
+
+### OH state-awareness invariants (post-TN-disabled)
+Every place that used to hardcode TN/Knoxville/Tennessee is now `notice.state`-driven:
+- `address_standardizer` Smarty state-safety check uses `notice.state` (not `"TN"`)
+- `obituary_enricher._set_enrichment_state(notices)` sets module-level state from the first notice (Actor runs are single-state, safe)
+- `_search_obituary`, `_search_survivors_targeted`, people-search URLs, `ADDRESS_EXTRACT_PROMPT`, `OBITUARY_PROMPT`, `ancestry_enricher.lookup_deceased` — all parametrized by `{state_name}` / `{state_code}`
+- `_lookup_dm_address` Tier 1 Knox Tax API is **gated behind `state == "TN"`** — never pointed at OH surnames
+- `main.py` property-lookup call gates on `state == "TN"` for the KGIS/TPAD path; OH takes the `lookup_ohio_decedent_properties` branch instead
+- **Do not reintroduce TN string literals in enrichment code** — the first regression was Francine Ball's OH property getting stamped with a "Clinton TN 44224" mailing address (44224 is Stow OH) and Sean caught it in a DMs CSV.
 
 ## Key Domain Rules
 
@@ -123,20 +158,24 @@ apify push
 
 ### Actor Input (configured in Apify Console or `input.json`)
 - `mode`: "daily" or "historical"
-- `counties` / `types`: arrays to filter saved searches (empty = all)
-- `tn_username`, `tn_password`, `captcha_api_key`: secrets (required)
-- `google_drive_folder_id`, `google_service_account_key`: optional Google Drive upload
+- `counties` / `types`: arrays to filter OH scrapers (empty = all OH counties)
+- `tn_username`, `tn_password`, `captcha_api_key`: TN secrets (only used when `SAVED_SEARCHES` is re-enabled)
+- `ms_graph_client_id`, `ms_graph_refresh_token`: **primary** output storage — OneDrive upload
+- `google_drive_folder_id`, `google_service_account_key`: legacy Google Drive upload (deprecated)
 
 ### Actor Output
 - **Dataset**: structured records pushed via `Actor.push_data()`
-- **Key-value store**: `output.csv` backup
-- **Google Drive** (optional): CSV + summary text file uploaded via service account
+- **Key-value store**: `output.csv` backup + signed URLs for Slack fallback
+- **OneDrive** (primary): CSVs + deep-prospecting PDFs at `/SiftStack/{YYYY-MM-DD}[/{County}[/{type}]]/`
+- **Google Drive** (legacy): retained but no longer wired into the Actor run
 
 ### Key Files
 - `.actor/actor.json` — Actor manifest (name, version, Dockerfile path)
 - `.actor/input_schema.json` — Input fields + validation for Apify Console UI
 - `Dockerfile` — Based on `apify/actor-python-playwright:3.12`
-- `src/drive_uploader.py` — Google Drive upload via base64-encoded service account key
+- `src/onedrive_uploader.py` — OneDrive upload via Microsoft Graph (primary)
+- `src/drive_uploader.py` — Google Drive upload via service account key (legacy)
+- `src/proxy_config.py` — Apify RESIDENTIAL proxy routing for every OH HTTP call
 - `input.json` — Local test input (gitignored, contains credentials)
 
 ## Courthouse Photo Pipeline (build 1.0.28+)
@@ -220,6 +259,7 @@ DataSift.ai (formerly REISift) is the CRM where scraped records land for niche s
 - **Lists + Notes (2):** Lists (for niche sequential), Notes (contextual per notice type)
 - **Built-in fields (13):** Estimated Value, MSL Status, Last Sale Date/Price, Equity Percentage, Tax Deliquent Value, Tax Delinquent Year, Tax Auction Date, Foreclosure Date, Probate Open Date, Personal Representative, Parcel ID, Structure Type, Year Built, Living SqFt, Bedrooms, Bathrooms, Lot (Acres)
 - **Custom fields (15):** Notice Type, County, Date Added, Owner Deceased, Date of Death, Decedent Name, Decision Maker, DM Relationship, DM Confidence, DM 2/3 Name/Relationship, Obituary URL, Source URL
+- **Mailability (4, added 2026-04-24):** Mailable (Yes if DPV in `Y/S`, No if failed), USPS Verified (Yes only on strict DPV `Y`), Vacant (Smarty vacant flag), RDI (Residential / Commercial / Mixed). Maps Smarty signals that were already populated on `NoticeData` but never reached the CSV — enables Sift-side filtering to drop vacant lots + commercial before marketing spend. Ty's template parity.
 
 ### Niche Sequential Marketing
 DataSift's niche sequential system uses filter presets to guide records through SMS → Call → Mail → Deep Prospecting phases. Two preset folders: "00 Niche Sequential Marketing" (12 presets, courthouse data) and "01. Bulk Sequential Marketing" (9 presets, bulk data). All 21 presets exclude Sold status (build 1.0.23). A "Sold Property Cleanup" sequence in the Transactions folder auto-fires on "Sold" tag to change status, remove from lists, clear tasks, and clear assignee.
@@ -414,7 +454,12 @@ plugin-name.plugin (ZIP containing):
 
 ## My Defaults
 
-- **Primary county:** Summit County, Ohio
-- **Daily summaries:** send to Slack
-- **Preferred run time:** 9:00 AM
+- **Primary geography:** Ohio — Cuyahoga / Summit / Stark (all three counties run every morning; Summit is the acquisitions focus for doorknocking/field work, but data pulls cover the full set)
+- **Daily summaries:** send to Slack/Discord via `SLACK_WEBHOOK_URL`; link CSVs + deep-prospecting PDFs using **OneDrive share URLs** (anonymous scope, no sign-in required for teammates)
+- **Run time:** 9:00 AM ET daily, scheduled on Apify (confirmed live 2026-04-22)
 - **Dispositions:** route to "First to Market (FTM)"
+- **Output storage:** OneDrive is primary (`/SiftStack/{YYYY-MM-DD}[/{County}[/{type}]]/`). CLI runs can redirect output via `OUTPUT_DIR` env var — point it at a OneDrive-synced local folder (e.g. `C:\Users\SeanJones\OneDrive\SiftStack\output`); do NOT move the repo itself into a synced folder (.git thrashing)
+- **Parallel backfills:** when running multiple county-scoped backfills to beat the 2hr enrichment timeout, ALWAYS use `--counties` (and optionally `--types`) so OneDrive paths don't collide. Unscoped runs write to flat `/SiftStack/{date}/`; scoped runs write to `/SiftStack/{date}/{County}/...`
+- **Manual xlsx dumps:** `scripts/import_manual_foreclosures.py` converts Sean's pre-automation spreadsheets. **Stark requires CPC-only filter** — AMC/CMC/MMC "F" cases are municipal consumer debt, not foreclosures (706 → 209 real in the 2026-04 backfill). This is enforced in the script automatically.
+- **State-aware everything:** no TN/Knox string literals in enrichment code. The rule applies to Smarty, obituary search, LLM prompts, Tracerfy, people-search URLs, and Knox Tax API (gated on `state == "TN"`).
+- **Probate address-lookup expectations:** Cuyahoga hits ~62%, Stark ~22%, Summit needs no lookup. Misses at the 0.6 token-overlap floor are genuinely non-owning decedents — don't loosen the threshold to chase them.

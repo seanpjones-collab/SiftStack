@@ -55,6 +55,8 @@ async def upload_csv(
     mode: str = "add",
     list_name: str | None = None,
     existing_list: bool = False,
+    step2_custom_tag: str | None = "Courthouse Data",
+    do_manual_column_mapping: bool = True,
 ) -> dict:
     """Upload a CSV file to DataSift via the 7-step upload wizard.
 
@@ -62,9 +64,10 @@ async def upload_csv(
     1. Click "Upload File" in sidebar
     2. Choose "Add data" or "Update data"
     3. "Let's Stay Organized" questions
-    4. Tags step (CSV has Tags column — skip adding custom tags)
+    4. Tags step (optionally add a custom tag — see step2_custom_tag arg)
     5. Browse/upload CSV file
-    6. Map columns (auto-maps recognized headers)
+    6. Map columns (auto-maps recognized headers; manual drag for Tags+Lists
+       can be opt-out via do_manual_column_mapping=False)
     7. Review and "Finish Upload"
 
     Args:
@@ -74,6 +77,17 @@ async def upload_csv(
         list_name: Target list name. Required when existing_list=True.
         existing_list: If True, select "Adding properties to an existing list"
             instead of creating a new list. The list must already exist in DataSift.
+        step2_custom_tag: Tag name to add at Wizard Step 2. Defaults to
+            "Courthouse Data" for backwards compat with the daily Apify pipeline.
+            Pass None to skip Step 2 entirely (use when your CSV's Tags column
+            already carries every needed tag).
+        do_manual_column_mapping: When True (default, backwards compat), the
+            wizard explicitly drags Tags + Lists onto their target slots at
+            Step 4. When False, rely entirely on the wizard's auto-mapping —
+            which on this Sift account auto-maps Tags + Lists correctly.
+            The manual drag has been observed to land on the wrong target
+            (e.g. dropping Tags onto an already-auto-mapped slot), so prefer
+            False for FTM-style uploads.
 
     Returns:
         Dict with upload results: {success, records_uploaded, errors, message}
@@ -304,72 +318,77 @@ async def upload_csv(
     await _click_next_step(page, timeout=30000)
 
     # ── Wizard Step 2: Add tags ──
-    logger.info("Wizard Step 2: Adding 'Courthouse Data' tag...")
-    await page.wait_for_timeout(1000)
-    await _screenshot(page, "step2_tags")
+    if step2_custom_tag is None:
+        logger.info("Wizard Step 2: skipping custom tag (CSV Tags column carries them)")
+        await page.wait_for_timeout(1000)
+        await _screenshot(page, "step2_skipped")
+    else:
+        logger.info("Wizard Step 2: Adding %r tag...", step2_custom_tag)
+        await page.wait_for_timeout(1000)
+        await _screenshot(page, "step2_tags")
 
-    # Add "Courthouse Data" tag via the Custom Tags input on the right side
-    try:
-        tag_input = page.locator('input[placeholder*="Search or add a new tag"]')
-        if await tag_input.count() > 0:
-            # Click input first, then type to trigger autocomplete dropdown
-            await tag_input.first.click()
-            await page.wait_for_timeout(500)
-            await tag_input.first.fill("")
-            await page.wait_for_timeout(300)
-            await tag_input.first.type("Courthouse Data", delay=50)
-            await page.wait_for_timeout(1500)
-            await _screenshot(page, "step2_tag_typed")
+        # Add the custom tag via the Custom Tags input on the right side
+        try:
+            tag_input = page.locator('input[placeholder*="Search or add a new tag"]')
+            if await tag_input.count() > 0:
+                # Click input first, then type to trigger autocomplete dropdown
+                await tag_input.first.click()
+                await page.wait_for_timeout(500)
+                await tag_input.first.fill("")
+                await page.wait_for_timeout(300)
+                await tag_input.first.type(step2_custom_tag, delay=50)
+                await page.wait_for_timeout(1500)
+                await _screenshot(page, "step2_tag_typed")
 
-            # Check if "Courthouse Data" appears in autocomplete dropdown — click it
-            tag_option = page.locator('text="Courthouse Data"')
-            tag_count = await tag_option.count()
-            if tag_count > 1:
-                # Multiple matches — click the one in the dropdown (not the input)
-                await tag_option.nth(1).click()
-                await page.wait_for_timeout(1000)
-                logger.info("Selected 'Courthouse Data' from dropdown")
-            elif tag_count == 1:
-                # Check if it's the input value or a dropdown option
-                tag_box = await tag_option.first.bounding_box()
-                if tag_box and tag_box["y"] > 350:
-                    # It's below the input — it's a dropdown option
-                    await tag_option.first.click()
+                # Check if the tag appears in autocomplete dropdown — click it
+                tag_option = page.locator(f'text="{step2_custom_tag}"')
+                tag_count = await tag_option.count()
+                if tag_count > 1:
+                    # Multiple matches — click the one in the dropdown (not the input)
+                    await tag_option.nth(1).click()
                     await page.wait_for_timeout(1000)
-                    logger.info("Selected 'Courthouse Data' from dropdown")
+                    logger.info("Selected %r from dropdown", step2_custom_tag)
+                elif tag_count == 1:
+                    # Check if it's the input value or a dropdown option
+                    tag_box = await tag_option.first.bounding_box()
+                    if tag_box and tag_box["y"] > 350:
+                        # It's below the input — it's a dropdown option
+                        await tag_option.first.click()
+                        await page.wait_for_timeout(1000)
+                        logger.info("Selected %r from dropdown", step2_custom_tag)
+                    else:
+                        # It's the input itself — use JS to click "Add" or press Enter
+                        await tag_input.first.press("Enter")
+                        await page.wait_for_timeout(1000)
+                        logger.info("Added %r tag (via Enter)", step2_custom_tag)
                 else:
-                    # It's the input itself — use JS to click "Add" or press Enter
-                    await tag_input.first.press("Enter")
-                    await page.wait_for_timeout(1000)
-                    logger.info("Added 'Courthouse Data' tag (via Enter)")
-            else:
-                # No dropdown match — click "Add" via JS to create new tag
-                added = await page.evaluate('''() => {
-                    const els = document.querySelectorAll('span, div, a, button, p');
-                    for (const el of els) {
-                        const text = el.textContent.trim();
-                        const rect = el.getBoundingClientRect();
-                        if (text === "Add" && rect.width > 0 && rect.width < 60
-                            && rect.x > 700 && rect.y > 250 && rect.y < 400) {
-                            el.click();
-                            return true;
+                    # No dropdown match — click "Add" via JS to create new tag
+                    added = await page.evaluate('''() => {
+                        const els = document.querySelectorAll('span, div, a, button, p');
+                        for (const el of els) {
+                            const text = el.textContent.trim();
+                            const rect = el.getBoundingClientRect();
+                            if (text === "Add" && rect.width > 0 && rect.width < 60
+                                && rect.x > 700 && rect.y > 250 && rect.y < 400) {
+                                el.click();
+                                return true;
+                            }
                         }
-                    }
-                    return false;
-                }''')
-                if added:
-                    await page.wait_for_timeout(1000)
-                    logger.info("Created 'Courthouse Data' tag via Add button")
-                else:
-                    await tag_input.first.press("Enter")
-                    await page.wait_for_timeout(1000)
-                    logger.info("Added 'Courthouse Data' tag (via Enter fallback)")
+                        return false;
+                    }''')
+                    if added:
+                        await page.wait_for_timeout(1000)
+                        logger.info("Created %r tag via Add button", step2_custom_tag)
+                    else:
+                        await tag_input.first.press("Enter")
+                        await page.wait_for_timeout(1000)
+                        logger.info("Added %r tag (via Enter fallback)", step2_custom_tag)
 
-            await _screenshot(page, "step2_tag_added")
-        else:
-            logger.warning("Tag input not found — 'Courthouse Data' tag NOT added")
-    except Exception as e:
-        logger.warning("Tag addition failed: %s", e)
+                await _screenshot(page, "step2_tag_added")
+            else:
+                logger.warning("Tag input not found — %r tag NOT added", step2_custom_tag)
+        except Exception as e:
+            logger.warning("Tag addition failed: %s", e)
 
     await _click_next_step(page)
 
@@ -406,63 +425,268 @@ async def upload_csv(
     await _click_next_step(page)
 
     # ── Wizard Step 4: Map the columns ──
-    logger.info("Wizard Step 4: Column mapping — mapping Tags and Lists...")
+    logger.info("Wizard Step 4: Column mapping%s",
+                " — manual drag" if do_manual_column_mapping else " — relying on auto-map")
     await page.wait_for_timeout(3000)
     await _screenshot(page, "step4_column_mapping")
 
-    # Try to drag unmapped columns (left side) to their targets (right side)
-    # DataSift uses styled-components with draggable="false" — need slow mouse drag
-    async def _drag_column(source_el, target_el):
-        """Drag a CSV column card to a mapping target using slow mouse moves."""
-        src_box = await source_el.bounding_box()
-        dst_box = await target_el.bounding_box()
-        if not src_box or not dst_box:
-            return False
-        sx = src_box["x"] + src_box["width"] / 2
-        sy = src_box["y"] + src_box["height"] / 2
-        dx = dst_box["x"] + dst_box["width"] / 2
-        dy = dst_box["y"] + dst_box["height"] / 2
-        await page.mouse.move(sx, sy)
-        await page.wait_for_timeout(500)
-        await page.mouse.down()
-        await page.wait_for_timeout(500)
-        steps = 20
-        for i in range(1, steps + 1):
-            frac = i / steps
-            await page.mouse.move(
-                sx + (dx - sx) * frac,
-                sy + (dy - sy) * frac,
-            )
-            await page.wait_for_timeout(50)
-        await page.wait_for_timeout(500)
-        await page.mouse.up()
-        await page.wait_for_timeout(1000)
-        return True
+    if do_manual_column_mapping:
+        # Robust drag: find precise source (LEFT panel card whose primary
+        # label is the column name) and EMPTY target (RIGHT panel card whose
+        # primary label is the column name AND has no mapped value below).
+        # Scroll target into view first since the target slot is often below
+        # the viewport (~y=900+ in a 720-tall window).
+        async def _find_drag_positions(col_name: str, do_scroll: bool = True) -> dict | None:
+            """Use JS to locate source + empty target rects, optionally
+            scrolling the target into view first via el.scrollIntoView()
+            (which handles DataSift's independent right-panel scroll
+            container — per CLAUDE.md, window.scrollBy doesn't work on
+            those panels). Returns {source: {x,y,lines}, target: {...},
+            debug: [...]} for diagnosis."""
+            return await page.evaluate(
+                """([colName, doScroll]) => {
+                    function getLines(el) {
+                        const t = (el.innerText || '').trim();
+                        return t.split('\\n').map(l => l.trim()).filter(l => l);
+                    }
 
-    # Map Tags column: find "Tags" card on left, drag to "Tags" target on right
-    for col_name in ["Tags", "Lists"]:
-        try:
-            # Source: unmapped column card on the left (contains column name + sample data)
-            source = page.locator(f'div:has-text("{col_name}") >> visible=true').first
-            # Target: mapping slot on the right side (search for it)
-            # Right-side targets have the field name — search within right panel area
-            target = page.locator(f'text="{col_name}"').last
-            if await source.count() > 0 and await target.count() > 0:
-                src_box = await source.bounding_box()
-                tgt_box = await target.bounding_box()
-                # Ensure source is on left (<600px) and target is on right (>600px)
-                if src_box and tgt_box and src_box["x"] < 600 and tgt_box["x"] > 600:
-                    if await _drag_column(source, target):
-                        logger.info("Mapped column: %s", col_name)
-                        await page.wait_for_timeout(1000)
-                    else:
-                        logger.warning("Drag failed for column: %s", col_name)
-                else:
-                    logger.debug("Column %s: no valid source/target positions", col_name)
-            else:
-                logger.debug("Column %s: source or target not found", col_name)
-        except Exception as e:
-            logger.warning("Column mapping %s failed: %s", col_name, e)
+                    // Score every candidate card on the page that mentions colName
+                    const matches = [];
+                    const all = document.querySelectorAll('*');
+                    for (const el of all) {
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width < 60 || rect.width > 700) continue;
+                        if (rect.height < 25 || rect.height > 300) continue;
+                        if (rect.width === 0 || rect.height === 0) continue;
+
+                        const lines = getLines(el);
+                        if (!lines.length) continue;
+
+                        // Multiple match patterns for colName:
+                        //   "Tags" — exact label
+                        //   "Tags:" — labelled with colon
+                        //   "Tags " — followed by space + value
+                        const matchesAny = lines.some(l =>
+                            l === colName ||
+                            l === colName + ':' ||
+                            l.startsWith(colName + ' ') ||
+                            l.startsWith(colName + '\\t') ||
+                            l.startsWith(colName + ':')
+                        );
+                        if (!matchesAny) continue;
+
+                        // Score: prefer smaller cards with the label as
+                        // first line and few lines (= empty target)
+                        let score = 0;
+                        if (lines[0] === colName) score += 10;
+                        if (lines[0].startsWith(colName)) score += 3;
+                        if (lines.length === 1) score += 8;       // bare label = clearly empty target
+                        if (lines.length === 2) score += 4;
+                        if (lines.length >= 4) score -= 8;        // mapped target has many lines
+                        score -= Math.max(0, lines.length - 3);
+
+                        matches.push({
+                            el, rect, lines, score,
+                            primaryX: rect.left + rect.width / 2,
+                            primaryY: rect.top + rect.height / 2,
+                            // Sidebar is 0-400px (per CLAUDE.md), exclude it.
+                            // LEFT mapping panel = 450 to roughly mid-viewport.
+                            // RIGHT mapping panel = mid-viewport onward.
+                            isLeft: rect.left > 450 && rect.left < window.innerWidth * 0.55,
+                            isRight: rect.left >= window.innerWidth * 0.55,
+                            isSidebar: rect.left <= 450,
+                        });
+                    }
+
+                    matches.sort((a, b) => b.score - a.score);
+
+                    // Pick highest-scoring left and right (sidebar excluded)
+                    const leftMatches = matches.filter(m => m.isLeft);
+                    const rightMatches = matches.filter(m => m.isRight);
+                    const sidebarMatches = matches.filter(m => m.isSidebar);
+                    const source = leftMatches[0] || null;
+                    // For target: prefer empty (lines <= 2) over mapped
+                    const emptyRights = rightMatches.filter(m => m.lines.length <= 2);
+                    const target = emptyRights[0] || rightMatches[0] || null;
+
+                    // Scroll target into view via scrollIntoView — handles
+                    // DataSift's independent right-panel scroll container.
+                    if (doScroll && target) {
+                        target.el.scrollIntoView({block: 'center', behavior: 'instant'});
+                    }
+                    if (doScroll && source) {
+                        // Also bring source into view (may be in left panel scroll)
+                        source.el.scrollIntoView({block: 'center', behavior: 'instant'});
+                        // Then re-scroll target so it ends up visible last
+                        if (target) {
+                            target.el.scrollIntoView({block: 'center', behavior: 'instant'});
+                        }
+                    }
+
+                    function snapshot(m) {
+                        if (!m) return null;
+                        const r = m.el.getBoundingClientRect();
+                        return {
+                            x: r.left + r.width / 2,
+                            y: r.top + r.height / 2,
+                            lines: m.lines,
+                            score: m.score,
+                        };
+                    }
+
+                    function dbg(m) {
+                        return {
+                            lines: m.lines,
+                            score: m.score,
+                            x: Math.round(m.rect.left + m.rect.width / 2),
+                            y: Math.round(m.rect.top + m.rect.height / 2),
+                        };
+                    }
+
+                    return {
+                        source: snapshot(source),
+                        target: snapshot(target),
+                        // Debug: top matches per panel so we can diagnose
+                        // when targeting picks the wrong card. Sidebar
+                        // matches MUST be excluded (per CLAUDE.md).
+                        debug_left_top5: leftMatches.slice(0, 5).map(dbg),
+                        debug_right_top5: rightMatches.slice(0, 5).map(dbg),
+                        debug_sidebar_count: sidebarMatches.length,
+                        debug_viewport_w: window.innerWidth,
+                        mappedFallback: rightMatches.length > 0 && (!target || target.lines.length > 2),
+                    };
+                }""",
+                [col_name, do_scroll],
+            )
+
+        async def _scroll_into_view(y: float) -> None:
+            """Scroll the page so the given y-coordinate is in mid-viewport."""
+            await page.evaluate(
+                """(targetY) => {
+                    const viewportH = window.innerHeight;
+                    if (targetY < 100 || targetY > viewportH - 100) {
+                        window.scrollBy(0, targetY - viewportH / 2);
+                    }
+                }""",
+                y,
+            )
+            await page.wait_for_timeout(500)
+
+        async def _drag(src: dict, tgt: dict) -> None:
+            """Slow mouse drag from src to tgt with end-jitter for drop registration."""
+            await page.mouse.move(src["x"], src["y"])
+            await page.wait_for_timeout(300)
+            await page.mouse.down()
+            await page.wait_for_timeout(500)
+            steps = 25
+            for i in range(1, steps + 1):
+                frac = i / steps
+                await page.mouse.move(
+                    src["x"] + (tgt["x"] - src["x"]) * frac,
+                    src["y"] + (tgt["y"] - src["y"]) * frac,
+                )
+                await page.wait_for_timeout(40)
+            # End-jitter to make sure drop event fires
+            await page.mouse.move(tgt["x"] + 2, tgt["y"] + 2)
+            await page.wait_for_timeout(100)
+            await page.mouse.move(tgt["x"], tgt["y"])
+            await page.wait_for_timeout(300)
+            await page.mouse.up()
+            await page.wait_for_timeout(1500)
+
+        # Track each column's outcome: "mapped" (we dragged it),
+        # "already_mapped" (auto-map already handled), or "failed".
+        # If BOTH Tags and Lists end up "failed", abort BEFORE clicking
+        # Next/Finish to avoid leaving an orphaned upload (Sift commits
+        # records to a list at Step 3 even if Step 5 never fires).
+        mapping_outcomes: dict[str, str] = {}
+        for col_name in ["Tags", "Lists"]:
+            try:
+                # _find_drag_positions does the scrollIntoView itself (handles
+                # DataSift's independent right-panel scroll container)
+                positions = await _find_drag_positions(col_name, do_scroll=True)
+                if not positions:
+                    logger.warning("Mapping %s: JS lookup returned nothing", col_name)
+                    mapping_outcomes[col_name] = "failed"
+                    continue
+
+                # Always log debug info so we can see what cards were
+                # candidates if drag landing is wrong. Especially the
+                # left-panel candidates — picking a sidebar element by
+                # mistake means the mouse drag becomes a text selection
+                # instead of a card drag.
+                logger.info(
+                    "Mapping %s: viewport_width=%s, sidebar_matches=%d (excluded)",
+                    col_name,
+                    positions.get("debug_viewport_w"),
+                    positions.get("debug_sidebar_count", 0),
+                )
+                logger.info(
+                    "Mapping %s: LEFT candidates = %s",
+                    col_name, positions.get("debug_left_top5", []),
+                )
+                logger.info(
+                    "Mapping %s: RIGHT candidates = %s",
+                    col_name, positions.get("debug_right_top5", []),
+                )
+
+                source = positions.get("source")
+                target = positions.get("target")
+                if not source:
+                    logger.warning(
+                        "Mapping %s: no LEFT source card found — column may already be mapped",
+                        col_name,
+                    )
+                    mapping_outcomes[col_name] = "already_mapped"
+                    continue
+                if not target or positions.get("mappedFallback"):
+                    logger.warning(
+                        "Mapping %s: no EMPTY right target slot found "
+                        "(target=%s, mappedFallback=%s)",
+                        col_name, target, positions.get("mappedFallback"),
+                    )
+                    mapping_outcomes[col_name] = "failed"
+                    continue
+                # Wait briefly after scrollIntoView, then re-fetch coords
+                await page.wait_for_timeout(800)
+                positions2 = await _find_drag_positions(col_name, do_scroll=False)
+                if positions2 and positions2.get("source") and positions2.get("target"):
+                    source = positions2["source"]
+                    target = positions2["target"]
+                logger.info(
+                    "Mapping %s: source(score=%d, lines=%s) target(score=%d, lines=%s) "
+                    "dragging (%d,%d) -> (%d,%d)",
+                    col_name,
+                    source.get("score", 0), source.get("lines", []),
+                    target.get("score", 0), target.get("lines", []),
+                    int(source["x"]), int(source["y"]),
+                    int(target["x"]), int(target["y"]),
+                )
+                await _drag(source, target)
+                await _screenshot(page, f"step4_after_{col_name.lower()}_drag")
+                logger.info("Mapped column: %s", col_name)
+                mapping_outcomes[col_name] = "mapped"
+            except Exception as e:
+                logger.warning("Column mapping %s failed: %s", col_name, e)
+                mapping_outcomes[col_name] = "failed"
+
+        # Kill switch: if BOTH critical mappings failed, the upload would
+        # leave an orphaned tracking list with records but no list/tag
+        # assignment. Abort now and warn the user to clean up the partial
+        # list shell that was created at Step 3.
+        if all(v == "failed" for v in mapping_outcomes.values()):
+            logger.error(
+                "ABORT: Step 4 mapping failed for all of %s. The wizard's Step 3 "
+                "may have already ingested records into a tracking list — clean it up "
+                "in Sift before retrying.",
+                list(mapping_outcomes.keys()),
+            )
+            result["message"] = (
+                f"Step 4 mapping failed for {list(mapping_outcomes.keys())}. "
+                "Records may be orphaned in a Step-3 tracking list — manual cleanup needed."
+            )
+            await _screenshot(page, "step4_killswitch_abort")
+            return result
 
     await _screenshot(page, "step4_after_mapping")
 
@@ -523,6 +747,43 @@ async def _navigate_to_records(page: Page) -> None:
         await page.goto(DATASIFT_RECORDS_URL, wait_until="domcontentloaded")
     await page.wait_for_timeout(5000)
     await _dismiss_popups(page)
+
+
+async def _click_records_all_tab(page: Page) -> bool:
+    """On the Records page, click the 'All' tab (segmented control with
+    [Clean | Incomplete | All]). Default is 'Clean' which hides records whose
+    phone enrichment isn't complete — including records that were just
+    uploaded with raw CSV phones. Every flow that selects records for bulk
+    actions (export, skip-trace, enrich, etc.) should call this first.
+
+    Returns True if the tab was clicked, False if not found."""
+    try:
+        click_result = await page.evaluate("""() => {
+            const all = Array.from(document.querySelectorAll('button, div, span, a, li'));
+            for (const el of all) {
+                const ownText = (el.childNodes.length === 1 && el.firstChild.nodeType === 3)
+                    ? el.firstChild.textContent.trim()
+                    : el.textContent.trim();
+                if (ownText !== 'All') continue;
+                const parent = el.parentElement;
+                if (!parent) continue;
+                const siblingText = parent.textContent || '';
+                if (siblingText.includes('Clean') && siblingText.includes('Incomplete')) {
+                    el.click();
+                    return {clicked: true, tag: el.tagName};
+                }
+            }
+            return {clicked: false};
+        }""")
+        if click_result.get("clicked"):
+            logger.info("Records page — clicked 'All' tab (was on Clean by default)")
+            await page.wait_for_timeout(2000)
+            return True
+        logger.warning("Records page — 'All' tab not found; staying on default tab")
+        return False
+    except Exception as e:
+        logger.warning("Records page — failed to click 'All' tab: %s — continuing", e)
+        return False
 
 
 async def _filter_by_list(page: Page, list_name: str) -> bool:
@@ -625,6 +886,8 @@ async def _filter_by_list(page: Page, list_name: str) -> bool:
 
 async def _select_all_records(page: Page) -> bool:
     """Select all records on the current page. Returns True if selected."""
+    import re as _re
+
     try:
         # Dismiss popups aggressively — the notification popup blocks all clicks
         await _dismiss_popups(page)
@@ -633,6 +896,45 @@ async def _select_all_records(page: Page) -> bool:
         await page.wait_for_timeout(500)
 
         await _screenshot(page, "before_select_all")
+
+        # Strategy 0: CheckboxDropdown → "Select Max (N)" — selects ALL filtered
+        # records, not just visible. The header checkbox approach below only
+        # selects records on the current page (default ~10 visible).
+        try:
+            select_dropdown = page.locator('[class*="CheckboxDropdown"]').first
+            if await select_dropdown.count() > 0:
+                await select_dropdown.click()
+                await page.wait_for_timeout(1000)
+
+                # Prefer "Select Max" (all filtered). Fall back to "Select All"
+                # / "Select Filtered" if Sift renames the option in the future.
+                select_all_option = page.get_by_text(
+                    _re.compile(r"Select\s*(Max|All|Filtered)", _re.IGNORECASE)
+                )
+                if await select_all_option.count() > 0:
+                    opt_text = await select_all_option.first.text_content()
+                    await select_all_option.first.click()
+                    await page.wait_for_timeout(2000)
+                    logger.info("Strategy 0: clicked '%s' from CheckboxDropdown", opt_text)
+
+                    # Verify selection succeeded
+                    manage_visible = await page.locator('button:has-text("Manage")').count() > 0
+                    send_to_visible = await page.locator('button:has-text("Send To")').count() > 0
+                    if manage_visible or send_to_visible:
+                        await _screenshot(page, "records_selected")
+                        logger.info("After select: Manage visible=%s, Send To visible=%s",
+                                    manage_visible, send_to_visible)
+                        return True
+                    logger.warning("Strategy 0 dropdown click didn't surface action buttons — falling back")
+                else:
+                    logger.warning("Strategy 0: CheckboxDropdown opened but no Select Max/All option found — falling back")
+                    # Close dropdown by pressing Escape so it doesn't block subsequent strategies
+                    await page.keyboard.press("Escape")
+                    await page.wait_for_timeout(500)
+            else:
+                logger.debug("Strategy 0: CheckboxDropdown not present on page — falling back to header checkbox")
+        except Exception as e:
+            logger.warning("Strategy 0 (CheckboxDropdown) failed: %s — falling back", e)
 
         # Strategy 1: Find the header checkbox position via JS, then use Playwright
         # mouse.click to properly trigger React's event system.
@@ -899,7 +1201,12 @@ async def skip_trace_records(page: Page, list_name: str) -> dict:
         if not filtered:
             logger.warning("Could not filter to list for skip trace — continuing anyway")
 
-        # Select all records
+        # Click All tab — Records page defaults to Clean which hides
+        # records without complete phone enrichment, including records that
+        # were just uploaded with raw CSV phones.
+        await _click_records_all_tab(page)
+
+        # Select all records (uses CheckboxDropdown → Select Max)
         selected = await _select_all_records(page)
         if not selected:
             result["message"] = "Could not select records for skip trace"
@@ -957,18 +1264,10 @@ async def skip_trace_records(page: Page, list_name: str) -> dict:
 
         await _screenshot(page, "skip_review_step")
 
-        # Step 2: Review step — may have tag input and a "Skip Trace" / confirm button
-        # Add a custom tag (optional — DataSift auto-tags too)
-        tag_input = page.locator('input[placeholder*="tag"], input[placeholder*="Tag"], input[placeholder*="Add tag"]')
-        if await tag_input.count() > 0:
-            from datetime import datetime as _dt
-            tag = f"skip_traced_{_dt.now().strftime('%Y-%m')}"
-            await tag_input.first.fill(tag)
-            await page.wait_for_timeout(500)
-            await tag_input.first.press("Enter")
-            await page.wait_for_timeout(500)
-            logger.info("Added skip trace tag: %s", tag)
-
+        # Step 2: Review step — Sift auto-tags `skip_traced_YYYY-MM` itself
+        # (per CLAUDE.md), no need to add a custom tag here. Previous code
+        # filled a tag input + Enter, which left the autocomplete dropdown
+        # open and blocked the Skip Trace submit button. Skipping that.
         await _screenshot(page, "skip_ready")
 
         # Click the confirm/submit button to start skip trace
@@ -1090,6 +1389,8 @@ async def upload_datasift_split(
     enrich: bool = True,
     skip_trace: bool = True,
     existing_list: bool = False,
+    step2_custom_tag: str | None = "Courthouse Data",
+    do_manual_column_mapping: bool = True,
 ) -> dict:
     """Upload multiple CSVs sequentially for split Message Board entries.
 
@@ -1105,6 +1406,10 @@ async def upload_datasift_split(
         enrich: Run enrichment after all uploads (default True).
         skip_trace: Run skip trace after all uploads (default True).
         existing_list: If True, target existing lists instead of creating new ones.
+        step2_custom_tag: Tag to add at wizard Step 2. Defaults to
+            "Courthouse Data" for backwards compat. Pass None to skip Step 2.
+        do_manual_column_mapping: When False, skips the legacy manual drag of
+            Tags + Lists at Step 4 and relies on Sift's auto-mapping.
 
     Returns:
         Dict with per-upload results, enrich_result, and skip_trace_result.
@@ -1120,15 +1425,24 @@ async def upload_datasift_split(
         }
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=headless)
-        context = await browser.new_context(
-            viewport={"width": 1280, "height": 720},
-            user_agent=(
+        # When watching the upload (headless=False), maximize the window
+        # so the user can see Tags + Lists targets at the bottom of the
+        # mapping panel without the script having to scroll.
+        launch_args = ["--start-maximized"] if not headless else []
+        browser = await p.chromium.launch(headless=headless, args=launch_args)
+        context_kwargs = {
+            "user_agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/120.0.0.0 Safari/537.36"
             ),
-        )
+        }
+        if headless:
+            context_kwargs["viewport"] = {"width": 1280, "height": 720}
+        else:
+            # no_viewport=True makes Playwright use the actual window size
+            context_kwargs["no_viewport"] = True
+        context = await browser.new_context(**context_kwargs)
         page = await context.new_page()
 
         try:
@@ -1152,6 +1466,8 @@ async def upload_datasift_split(
                 result = await upload_csv(
                     page, info["path"], list_name=info["list_name"],
                     existing_list=existing_list,
+                    step2_custom_tag=step2_custom_tag,
+                    do_manual_column_mapping=do_manual_column_mapping,
                 )
                 result["label"] = label
                 uploads.append(result)
@@ -1248,6 +1564,11 @@ async def export_phone_enrichment(
 
         await page.wait_for_timeout(2000)
 
+        # Click the "All" tab — see _click_records_all_tab for the full
+        # explanation. Records page defaults to "Clean" which hides records
+        # without complete phone enrichment.
+        await _click_records_all_tab(page)
+
         # Select all records
         selected = await _select_all_records(page)
         if not selected:
@@ -1291,6 +1612,60 @@ async def export_phone_enrichment(
         # The export may trigger a direct download or process in background.
 
         await _screenshot(page, "export_wizard_step1")
+
+        # Step 1 has two rows of toggle buttons that filter which phones to
+        # export:
+        #   INCLUDE NUMBERS BY TYPE:   Unknown, Landline, Mobile, VoIP
+        #   INCLUDE NUMBERS BY STATUS: Correct, Wrong, No Answer, Dead, DNC, No Status
+        # Active buttons have a dark navy background; inactive are light gray.
+        # By default only "No Status" is active in the STATUS row, which drops
+        # every phone Sift has previously categorized — including all the
+        # Podio-uploaded phones that have been skip-traced. We toggle ON
+        # every inactive button so the export includes every phone.
+        #
+        # Click via JS to bypass the Modalstyles__ModalOverlay pointer
+        # interception (the standard CLAUDE.md workaround).
+        try:
+            click_result = await page.evaluate("""() => {
+                const root = document.querySelector('[class*="Modal"]') || document;
+                const targets = [
+                    'Unknown', 'Landline', 'Mobile', 'VoIP',
+                    'Correct', 'Wrong', 'No Answer', 'Dead', 'DNC', 'No Status'
+                ];
+                const buttons = root.querySelectorAll('button');
+                const clicked = [];
+                const skipped = [];
+                for (const btn of buttons) {
+                    const txt = btn.textContent.trim();
+                    if (!targets.includes(txt)) continue;
+                    // Active state = dark background. Sum the RGB channels;
+                    // active buttons have sum < 300 (dark navy ≈ 154),
+                    // inactive sum > 600 (light gray ≈ 700).
+                    const bg = window.getComputedStyle(btn).backgroundColor;
+                    const m = bg.match(/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)/);
+                    const sum = m ? (parseInt(m[1]) + parseInt(m[2]) + parseInt(m[3])) : 765;
+                    const isActive = sum < 400;
+                    if (!isActive) {
+                        btn.click();
+                        clicked.push(txt);
+                    } else {
+                        skipped.push(txt);
+                    }
+                }
+                return {clicked, skipped};
+            }""")
+            clicked = click_result.get("clicked", [])
+            skipped = click_result.get("skipped", [])
+            if clicked:
+                logger.info("Export wizard step 1 — toggled ON %d filter button(s): %s",
+                            len(clicked), clicked)
+                logger.debug("Already active: %s", skipped)
+                await page.wait_for_timeout(1500)
+            else:
+                logger.info("Export wizard step 1 — all %d filter buttons already active",
+                            len(skipped))
+        except Exception as e:
+            logger.warning("Export wizard step 1: filter toggle failed: %s — continuing", e)
 
         # Step 1: Click "Next" to advance past phone filters
         next_btn = page.locator('button:has-text("Next")')

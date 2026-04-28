@@ -42,6 +42,10 @@ storage/
 # Test data & photos
 test_photos/
 
+# DataSift Playwright debug screenshots (one-off captures from test runs)
+/datasift_*.png
+/datasift_*/
+
 # Skills distribution ZIPs (large, distributed separately)
 Skills for REI/
 *.skill

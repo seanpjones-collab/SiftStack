@@ -614,16 +614,32 @@ async def scrape_cuyahoga_cpdocket_foreclosures(
     """
     results_by_case: dict[str, NoticeData] = {}
     stats = {"emitted": 0, "commercial": 0, "procedural_only": 0, "no_case": 0}
+    ft_success: list[str] = []
+    ft_failed: list[tuple[str, str]] = []  # [(filing_type, error_msg), ...]
 
     async with CuyahogaCpDocketClient(headed=headed, proxy_url=proxy_url) as client:
         for i, (ft, notice_type, subtype) in enumerate(filing_types):
             if i > 0:
                 await asyncio.sleep(BETWEEN_SEARCH_DELAY_SECONDS)
-            rows = await client.search_foreclosures(
-                filing_type=ft,
-                start_date=start_date,
-                end_date=end_date,
-            )
+            # Per-filing-type try/except — one filing type's session/AJAX
+            # weirdness shouldn't lose progress already collected from
+            # earlier filing types. cpdocket's ASP.NET form state can drift
+            # between submits (especially after an empty-results redirect),
+            # so we recover at the filing-type boundary instead of letting
+            # the whole function bail and forcing the outer wrapper to retry
+            # everything from scratch.
+            try:
+                rows = await client.search_foreclosures(
+                    filing_type=ft,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+            except Exception as exc:
+                logger.warning("cpdocket %s failed: %s — continuing with "
+                               "remaining filing types", ft, exc)
+                ft_failed.append((ft, str(exc)))
+                continue
+            ft_success.append(ft)
             logger.info("cpdocket %s: %d rows", ft, len(rows))
 
             for row in rows:
@@ -655,6 +671,23 @@ async def scrape_cuyahoga_cpdocket_foreclosures(
         stats["emitted"], stats["commercial"],
         stats["procedural_only"], stats["no_case"],
     )
+    if ft_failed:
+        logger.warning(
+            "cpdocket: %d/%d filing types failed (%s); proceeding with %d "
+            "successful types' results",
+            len(ft_failed), len(filing_types),
+            ", ".join(ft for ft, _ in ft_failed), len(ft_success),
+        )
+    # If EVERY filing type failed, raise so the outer wrapper's full retry
+    # (fresh browser + fresh proxy tunnel) actually kicks in. A single
+    # successful filing type — even with zero rows — counts as a working
+    # session and we accept the result.
+    if not ft_success:
+        first_err = ft_failed[0][1] if ft_failed else "no filing types attempted"
+        raise CuyahogaCpDocketError(
+            f"cpdocket: all {len(filing_types)} filing types failed; "
+            f"first error: {first_err}"
+        )
     return list(results_by_case.values())
 
 

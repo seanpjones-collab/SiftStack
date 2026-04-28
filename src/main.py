@@ -878,11 +878,15 @@ async def actor_main() -> None:
                 try:
                     from slack_notifier import send_slack_notification, _send_webhook
 
-                    # Send standard run summary with cost breakdown
+                    # Send standard run summary with cost breakdown.
+                    # scraper_success/skipped surfaces silent per-scraper
+                    # failures that zero-record counts would otherwise hide.
                     send_slack_notification(
                         notices,
                         elapsed_min=elapsed_min,
                         cost_breakdown=cost_breakdown,
+                        scraper_success=scraper_success,
+                        scraper_skipped=scraper_skipped,
                     )
 
                     # Send DataSift CSV download links as a follow-up message
@@ -2311,6 +2315,8 @@ def _run_scrape_pipeline(args, counties, types) -> None:
     # Unwrap the new dict return shape into the legacy `notices` variable
     # that the rest of this function expects.
     notices = dispatch_result["records"]
+    scraper_success = dispatch_result.get("success") or {}
+    scraper_skipped = dispatch_result.get("skipped") or set()
     # Handle async probate property lookup before enrichment.
     # Two separate modules: TN (Knox/Blount) uses KGIS/TPAD, OH (Cuyahoga/Stark)
     # uses MyPlace JSON + IasWorld. Summit probate already has addresses from
@@ -2506,7 +2512,12 @@ def _run_scrape_pipeline(args, counties, types) -> None:
     if getattr(args, "notify_slack", False):
         from slack_notifier import send_slack_notification
 
-        send_slack_notification(notices, upload_result=upload_result)
+        send_slack_notification(
+            notices,
+            upload_result=upload_result,
+            scraper_success=scraper_success,
+            scraper_skipped=scraper_skipped,
+        )
 
     # Audit DataSift for incomplete records (future daily check)
     if getattr(args, "audit_records", False):

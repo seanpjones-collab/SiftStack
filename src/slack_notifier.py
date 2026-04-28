@@ -169,6 +169,8 @@ def build_summary(
     cost_breakdown: dict | None = None,
     csv_link: str | None = None,
     pdf_links: list[tuple[str, str]] | None = None,
+    scraper_success: dict | None = None,
+    scraper_skipped: set | None = None,
 ) -> str:
     """Build a plain-text run summary for Slack/Discord.
 
@@ -178,6 +180,12 @@ def build_summary(
         elapsed_min: Pipeline elapsed time in minutes.
         api_cost: Estimated Haiku API cost for this run (legacy, use cost_breakdown).
         cost_breakdown: Dict of service -> cost, e.g. {"2Captcha": 0.09, "Tracerfy": 0.26}.
+        scraper_success: Dict[(county_lower, ntype), bool] from oh_dispatcher.
+            When provided, the summary explicitly lists every scraper's
+            status (succeeded / failed / skipped) so silent failures
+            surface in the report instead of being hidden by zero counts.
+        scraper_skipped: Set[(county_lower, ntype)] from oh_dispatcher
+            (scrapers caught up — no work to do).
     """
     total = len(notices)
     by_county = _count_by_field(notices, "county")
@@ -211,6 +219,49 @@ def build_summary(
     type_parts = [f"{t}: {c}" for t, c in sorted(by_type.items())]
     if type_parts:
         lines.append(f"  {' | '.join(type_parts)}")
+
+    # Per-scraper status — surfaces silent failures the totals would hide.
+    # Without this, a scraper that crashed and produced 0 records is
+    # indistinguishable in the report from a scraper that ran successfully
+    # but legitimately had nothing to scrape.
+    if scraper_success is not None:
+        failed = sorted(k for k, ok in scraper_success.items() if not ok)
+        skipped = sorted(scraper_skipped) if scraper_skipped else []
+        succeeded = sorted(k for k, ok in scraper_success.items() if ok)
+
+        if failed:
+            lines.append("")
+            lines.append(
+                f"*FAILED:* {len(failed)} scraper{'s' if len(failed) != 1 else ''} "
+                f"(KVS not advanced — will retry tomorrow):"
+            )
+            for county, ntype in failed:
+                lines.append(f"  {county.title()} {ntype}")
+
+        # Always show per-scraper counts when we have the dispatcher data —
+        # makes it explicit which scrapers ran, even when all succeeded.
+        scraper_counts: dict[tuple[str, str], int] = {}
+        for n in notices:
+            c = (n.county or "").lower()
+            t = (n.notice_type or "").lower()
+            if c and t:
+                scraper_counts[(c, t)] = scraper_counts.get((c, t), 0) + 1
+
+        if succeeded:
+            lines.append("")
+            lines.append("*Scraper counts:*")
+            for county, ntype in succeeded:
+                cnt = scraper_counts.get((county, ntype), 0)
+                lines.append(f"  {county.title()} {ntype}: {cnt}")
+
+        if skipped:
+            lines.append("")
+            lines.append(
+                f"*Skipped (caught up):* {len(skipped)} "
+                f"scraper{'s' if len(skipped) != 1 else ''}"
+            )
+            for county, ntype in skipped:
+                lines.append(f"  {county.title()} {ntype}")
 
     lines.append("")
 
@@ -293,6 +344,8 @@ def send_slack_notification(
     cost_breakdown: dict | None = None,
     csv_link: str | None = None,
     pdf_links: list[tuple[str, str]] | None = None,
+    scraper_success: dict | None = None,
+    scraper_skipped: set | None = None,
 ) -> bool:
     """Send a run summary to Slack/Discord webhook.
 
@@ -320,6 +373,8 @@ def send_slack_notification(
         cost_breakdown=cost_breakdown,
         csv_link=csv_link,
         pdf_links=pdf_links,
+        scraper_success=scraper_success,
+        scraper_skipped=scraper_skipped,
     )
 
     sent = _send_webhook(text, webhook_url)

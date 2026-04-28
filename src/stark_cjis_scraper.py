@@ -222,15 +222,17 @@ class StarkCJISClient:
         *,
         params: Optional[list[tuple[str, str]]] = None,
         timeout: int,
-        max_attempts: int = 4,
+        max_attempts: int = 6,
     ) -> requests.Response:
         """GET with retry on transient errors (session expired, 5xx, WAF 4xx).
 
         Residential-proxy routing introduces per-tunnel flakiness: some IPs
         are flagged by site WAFs and respond with 403/405/429 even to valid
-        GETs. Retrying gets a fresh residential tunnel (often a different
-        IP) that usually works. Each retry re-runs through the same proxy
-        URL — the IP rotation is handled by the proxy server.
+        GETs. To recover, we tear down and recreate the requests.Session on
+        WAF hits — this drops the keep-alive TCP connection and forces the
+        Apify residential proxy to allocate a fresh outbound IP for the next
+        attempt. (Without this, retries reuse the same TCP socket and same
+        flagged IP, defeating the entire retry mechanism.)
         """
         import time as _time
         WAF_CODES = {403, 405, 408, 409, 429}
@@ -240,14 +242,16 @@ class StarkCJISClient:
                 resp = self.session.get(url, params=params, timeout=timeout)
             except requests.Timeout as e:
                 last_exc = e
-                logger.warning("Timeout on %s (attempt %d/%d)",
+                logger.warning("Timeout on %s (attempt %d/%d) — recycling session",
                                url, attempt + 1, max_attempts)
+                self._recycle_session()
                 _time.sleep(2 * (attempt + 1))
                 continue
             except requests.RequestException as e:
                 last_exc = e
-                logger.warning("Request failed on %s (attempt %d/%d): %s",
+                logger.warning("Request failed on %s (attempt %d/%d): %s — recycling session",
                                url, attempt + 1, max_attempts, e)
+                self._recycle_session()
                 _time.sleep(2 * (attempt + 1))
                 continue
 
@@ -259,8 +263,9 @@ class StarkCJISClient:
 
             if resp.status_code >= 500:
                 last_exc = StarkCJISError(f"{resp.status_code} for {url}")
-                logger.warning("Server %d on %s (attempt %d/%d)",
+                logger.warning("Server %d on %s (attempt %d/%d) — recycling session",
                                resp.status_code, url, attempt + 1, max_attempts)
+                self._recycle_session()
                 _time.sleep(2 * (attempt + 1))
                 continue
 
@@ -269,11 +274,12 @@ class StarkCJISClient:
                     f"{resp.status_code} (WAF / proxy-IP-flagged) for {url}"
                 )
                 logger.warning(
-                    "WAF %d on %s (attempt %d/%d) — likely proxy IP flagged; "
-                    "retrying for fresh tunnel",
+                    "WAF %d on %s (attempt %d/%d) — recycling session for "
+                    "fresh proxy IP",
                     resp.status_code, url, attempt + 1, max_attempts,
                 )
-                _time.sleep(3 * (attempt + 1))  # longer backoff for WAF
+                self._recycle_session()
+                _time.sleep(5 * (attempt + 1))  # longer backoff for WAF
                 continue
 
             resp.raise_for_status()
@@ -282,6 +288,20 @@ class StarkCJISClient:
         if last_exc:
             raise last_exc
         raise StarkCJISError(f"max attempts exhausted for {url}")
+
+    def _recycle_session(self) -> None:
+        """Close the current session and recreate it with a fresh TCP pool.
+
+        Forces the Apify residential proxy to hand out a different outbound
+        IP on the next request. Without this, urllib3's keep-alive and
+        connection pooling reuse the same socket — and therefore the same
+        proxy IP — across "retries", making the WAF retry loop a no-op.
+        """
+        try:
+            self.session.close()
+        except Exception:
+            pass
+        self.session = self._make_session(self._cookies, proxy_url=self.proxy_url)
 
 
 # ── Helpers ─────────────────────────────────────────────────────────

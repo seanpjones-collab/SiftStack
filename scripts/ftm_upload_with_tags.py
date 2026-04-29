@@ -41,10 +41,12 @@ import csv
 import logging
 import re
 import shutil
+import sys
 from datetime import datetime
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / "src"))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,38 +55,11 @@ logging.basicConfig(
 logger = logging.getLogger("ftm_upload")
 
 
-# ── Hot-zip lookup (5-star + 4-star from market research workbooks) ───
-# Sources (re-runnable):
-#   output/ftm_county_research/Cuyahoga_County_OH_Market_Research.xlsx
-#   output/ftm_county_research/Summit_County_OH_Market_Research.xlsx
-#   output/ftm_county_research/Stark_County_OH_Market_Research.xlsx
-# Pulled 2026-04-26.
-
-# All three workbooks recalibrated to FRED=55 (March 2026 reading) so star
-# ratings are apples-to-apples across counties — see
-# scripts/recalibrate_market_research.py.
-
-HOT_ZIPS_5_STAR = {
-    # Cuyahoga (8)
-    "44070", "44107", "44110", "44111", "44129", "44132", "44134", "44138",
-    # Summit (6)
-    "44203", "44221", "44224", "44306", "44310", "44319",
-    # Stark (3)
-    "44703", "44705", "44720",
-}
-
-HOT_ZIPS_4_STAR = {
-    # Cuyahoga (19)
-    "44017", "44102", "44109", "44121", "44122", "44123", "44124", "44125",
-    "44127", "44128", "44130", "44133", "44135", "44137", "44142", "44143",
-    "44144", "44146", "44147",
-    # Summit (9)
-    "44278", "44301", "44305", "44311", "44312", "44313", "44314", "44320", "44333",
-    # Stark (8)
-    "44641", "44646", "44647", "44706", "44708", "44709", "44710", "44730",
-}
-
-HOT_ZIPS = HOT_ZIPS_5_STAR | HOT_ZIPS_4_STAR  # union for any quick membership check
+# Hot-zip data lives in src/hot_zips.py — single source of truth shared by
+# the daily Apify pipeline (datasift_formatter._build_tags) and one-shot
+# scripts (this file, tag_podio_hot_zips.py). Re-exported here so existing
+# imports like `from ftm_upload_with_tags import HOT_ZIPS_5_STAR` keep working.
+from hot_zips import HOT_ZIPS_5_STAR, HOT_ZIPS_4_STAR, HOT_ZIPS  # noqa: E402,F401
 
 
 # ── Source files (work-account OneDrive) ──────────────────────────────

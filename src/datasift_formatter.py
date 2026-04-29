@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 from config import OUTPUT_DIR
+from hot_zips import zip_tags
 from notice_parser import NoticeData
 
 logger = logging.getLogger(__name__)
@@ -335,6 +336,10 @@ def _build_tags(notice: NoticeData) -> str:
     # Photo import tag (source_url starts with "photo:")
     if notice.source_url and notice.source_url.startswith("photo:"):
         tags.append("photo_import")
+
+    # zipcode_<zip5> for every record + hot_zip + tier tag (5_star / 4_star)
+    # for OH priority ZIPs. Single source of truth: src/hot_zips.py.
+    tags.extend(zip_tags(notice.zip))
 
     return ",".join(tags)
 

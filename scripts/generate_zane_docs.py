@@ -1,9 +1,10 @@
-"""Generate Zane's three Word documents in one shot.
+"""Generate the four Acquisitions Word documents in one shot.
 
 Outputs:
-  - Zane_Acquisitions_SOP.docx        (full daily SOP with power hours)
-  - Zane_Companion_Training.docx      (objections, VMs, SMS, email)
-  - Zane_Cheat_Sheet.docx             (single-page printable reference)
+  - Acquisitions_SOP.docx                  (full daily SOP with power hours)
+  - Acquisitions_Companion_Training.docx   (objections, VMs, SMS, email)
+  - Acquisitions_Cheat_Sheet.docx          (single-page printable reference)
+  - Acquisitions_Onboarding_Checklist.docx (Day 1 / Week 1 / Month 1 / Month 3)
 
 Branding constants are at the top — change once, regenerate all three.
 """
@@ -160,7 +161,7 @@ def build_sop():
         section.right_margin = Inches(0.8)
 
     # Cover
-    add_heading(doc, "Zane — Acquisitions SOP", level=0)
+    add_heading(doc, "Acquisitions SOP", level=0)
     add_para(doc, f"{COMPANY}  |  {PHONE}  (toll-free)  |  {LOCAL_PHONE}  (local OH)  |  {WEBSITE}",
              italic=True, size=11)
     add_para(doc, "Lead Manager + Closer + Prospector (Specialist / Blueprint C)",
@@ -236,25 +237,53 @@ def build_sop():
     add_table(doc, ["Block", "Time", "Days", "Why"], power_hours)
     doc.add_paragraph()
     add_callout(doc,
-                "FRIDAY EVENING POWER HOUR GAP: Zane's current Friday schedule ends at 5 PM, "
+                "FRIDAY EVENING POWER HOUR GAP: The current Friday schedule ends at 5 PM, "
                 "missing the 5–6 PM power hour. Two options: extend Friday to 6 PM (gains "
                 "the highest-value hour of the week) OR drop Friday evening power hour. "
                 "Sean to decide.",
                 color="warn")
 
+    # STABM morning routine
+    add_pagebreak(doc)
+    add_heading(doc, "STABM — 5-Minute Morning Routine", level=1)
+    add_para(doc,
+             "Before any calls each day, run STABM. Five layers, one quick check each. "
+             "Catches every lead that would otherwise fall through the cracks.")
+    stabm = [
+        ("S — Status", "Every record's Property Status reflects current reality. No record "
+                       "left in 'New Lead' weeks after first contact."),
+        ("T — Tasks", "Every overdue task gets handled or rescheduled today. Zero overdue "
+                      "is the daily target."),
+        ("A — Assign", "Any unassigned records get assigned to a rep. Unassigned records "
+                       "fall through the cracks because no one owns them."),
+        ("B — Board", "SiftLine card position matches the property status. If the card is "
+                      "on 'Hot Lead' phase but status is still 'New Lead', the wrong "
+                      "sequence fires. Sync them."),
+        ("M — Messages", "Review message-board comments on records you'll touch today. "
+                         "Context for the call before you dial."),
+    ]
+    add_table(doc, ["Layer", "What to check"], stabm)
+    doc.add_paragraph()
+    add_callout(doc,
+                "Ty's data: operators who add the 5-minute STABM routine go from losing "
+                "3-4 deals a quarter to zero lost deals. Five minutes. Don't skip it.",
+                color="info")
+
     # Schedule + power hour overlay
     add_pagebreak(doc)
-    add_heading(doc, "Your Daily Routine (with Power Hour Overlay)", level=1)
-    add_para(doc, "Power hours marked with ⚡. During those windows: NO admin, NO follow-up "
-                  "calls — pure outbound to fresh hot leads.", italic=True)
+    add_heading(doc, "Daily Routine (with Power Hour Overlay)", level=1)
+    add_para(doc, "Power hours marked with ⚡. During those windows: no admin, no follow-up "
+                  "calls — pure outbound to fresh hot leads. Each day's start-of-day block "
+                  "begins with the STABM check (see prior section).", italic=True)
 
     # Monday
     add_heading(doc, "Monday — 2:00 PM – 8:00 PM (6 hours, 1 power hour)", level=2)
     add_para(doc, "Daily target: 50–80 dials, ~15–25 record-attempts.")
     monday = [
         ("2:00 – 2:30 PM", "Start of day",
-         "Open Sift. Review Tasks due today. Run preset '02. Ready to Call' (fresh FTM) and "
-         "'00. Hot Active Calls (Legacy)'. Note total queue count — flag Sean if >40."),
+         "Run STABM (5 min — see prior section). Then run preset '02. Ready to Call' "
+         "(fresh FTM) and '00. Hot Active Calls (Legacy)'. Note total queue count — "
+         "flag your manager if >40."),
         ("2:30 – 5:00 PM", "Block 1 — outbound + processing (2.5 hrs)",
          "Priority: Hot temp + 1–2-day cadence → Fresh FTM → Warm → Cold. "
          "smrtPhone click-to-dial. Status + next-step task after every call."),
@@ -361,8 +390,8 @@ def build_sop():
     add_para(doc, "Daily target: 30–50 dials during base hours, plus all inbound.")
     saturday = [
         ("9:00 – 9:30 AM", "Start of day",
-         "Saturday queue: hot leads (1–2-day cadence), inbound that came in overnight, "
-         "appointment confirms for the coming week."),
+         "Run STABM (5 min). Saturday queue: hot leads (1–2-day cadence), inbound that "
+         "came in overnight, appointment confirms for the coming week."),
         ("9:30 AM – 12:30 PM", "Inbound + hot lead focus (3 hrs)",
          "Saturdays are good for catching W-2 sellers home. Hit your hot list. "
          "Don't blast cold — Saturday is for high-quality outreach only."),
@@ -430,7 +459,7 @@ def build_sop():
 
     add_heading(doc, "The Opener", level=2)
     add_quote(doc,
-              f'"Hi, is this [PR/Executor first name]? My name is Zane with {COMPANY}. '
+              f'"Hi, is this [PR/Executor first name]? My name is [your name] with {COMPANY}. '
               f'First — I noticed you\'re handling [decedent\'s first name]\'s estate, '
               f'and I just wanted to say I\'m sorry for your loss. I work with families '
               f'navigating inherited properties in [Cuyahoga / Summit / Stark] County, '
@@ -481,7 +510,7 @@ def build_sop():
 
     add_heading(doc, "The Opener", level=2)
     add_quote(doc,
-              f'"Hi, is this [first name]? Zane here with {COMPANY}. I\'m reaching out '
+              f'"Hi, is this [first name]? [your name] here with {COMPANY}. I\'m reaching out '
               f'because I work with homeowners in [Cuyahoga / Summit / Stark] who are '
               f'dealing with the foreclosure process, and I noticed your situation. '
               f'Look — I\'m not calling to pitch you anything right now. I just want to '
@@ -516,6 +545,54 @@ def build_sop():
     add_bullet(doc, '"Don\'t worry, I can save you" — savior complex')
     add_bullet(doc, '"I can give you a great deal" — you\'re getting their house cheap; don\'t gloat')
     add_bullet(doc, '"How much are you asking?" — they have no asking price; ask what they NEED')
+
+    # Deal analysis workflow
+    add_pagebreak(doc)
+    add_heading(doc, "Deal Analysis — Between the Qualifying Call and the Offer Call", level=1)
+    add_para(doc, "After a qualifying call where all 4 Pillars are confirmed, you don't "
+                  "immediately make the offer. You take a first pass at the numbers, owner "
+                  "reviews and approves (or revises), then you go back to the seller with the "
+                  "approved offer.")
+    add_para(doc, "The point of you doing the analysis first: it builds your judgment over time, "
+                  "and it makes the owner's review faster than starting from scratch every deal.",
+             italic=True)
+
+    add_heading(doc, "Step 1 — Pull comps in SiftMap / Sift Properties", level=2)
+    add_bullet(doc, "Filter to the property's ZIP and similar attributes (beds/baths/sqft within ~10%, age within 15 years)")
+    add_bullet(doc, "Pull recent SOLD comps (last 6 months ideally, 12 if thin) AND active listings for trend")
+    add_bullet(doc, "Note finish levels: which comps are fully renovated, partially updated, or original condition? What did each tier command per sqft?")
+
+    add_heading(doc, "Step 2 — Determine As-Is value AND/OR ARV", level=2)
+    add_bullet(doc, "As-Is: what this property would fetch in its current condition (per the seller's account)")
+    add_bullet(doc, "ARV: what it would fetch fully renovated to market-tier finishes")
+    add_bullet(doc, "Use the project's real-estate-comping skill (Two-Bucket ARV methodology) for the framework")
+
+    add_heading(doc, "Step 3 — Compile repair list + rehab guesstimate", level=2)
+    add_bullet(doc, "From the 4 Pillars condition question, you have the seller's account of what's needed")
+    add_bullet(doc, "If you've done a walk-through, use those notes")
+    add_bullet(doc, "Take a swing at a rehab budget using room-by-room ranges (kitchen, bath, flooring, HVAC, roof, exterior). Don't agonize — your guess + owner's review lands in the right zone")
+    add_bullet(doc, "Use the project's rehab-estimator skill for the 4-tier framework + room ranges")
+
+    add_heading(doc, "Step 4 — Calculate MAO (Maximum Allowable Offer)", level=2)
+    add_bullet(doc, "75% rule: MAO = (ARV × 0.75) − rehab − fixed costs (closing, holding, agent if applicable)")
+    add_bullet(doc, "70% rule in tighter markets or higher-risk deals (older homes, distressed neighborhoods)")
+    add_bullet(doc, "Document your math so owner can audit the chain")
+
+    add_heading(doc, "Step 5 — Bring numbers to owner for review", level=2)
+    add_bullet(doc, "Send a quick summary: As-Is, ARV, repair list, rehab estimate, proposed offer ($X to $Y range)")
+    add_bullet(doc, "Owner reviews, may revise the rehab estimate, may set a different MAO, may approve as-is")
+    add_bullet(doc, "If owner doesn't like the numbers → re-evaluate together. Don't go back to the seller until owner approves.")
+
+    add_heading(doc, "Step 6 — Make the offer call", level=2)
+    add_bullet(doc, "Use the niche-appropriate offer script (probate or foreclosure version above)")
+    add_bullet(doc, "Stay within the owner-approved range")
+    add_bullet(doc, "If the seller counters outside the range → escalate to owner BEFORE agreeing to anything")
+
+    add_callout(doc,
+                "Getting better at this takes reps. Early on, expect owner to revise a lot — "
+                "that's the training. After 10–20 deals through this loop, your first-pass numbers "
+                "should land within 10% of the owner's revised numbers most of the time.",
+                color="info")
 
     # Status update
     add_pagebreak(doc)
@@ -585,11 +662,11 @@ def build_training():
         section.right_margin = Inches(0.8)
 
     # Cover
-    add_heading(doc, "Zane — Companion Training", level=0)
+    add_heading(doc, "Acquisitions — Companion Training", level=0)
     add_para(doc, f"{COMPANY}  |  {PHONE}  (toll-free)  |  {LOCAL_PHONE}  (local OH)  |  {WEBSITE}",
              italic=True, size=11)
     add_para(doc, "Objection Handling, Voicemails, SMS, Email Templates", italic=True, size=11)
-    add_para(doc, "Companion to: Zane Acquisitions SOP", italic=True, size=11)
+    add_para(doc, "Companion to: Acquisitions SOP", italic=True, size=11)
     add_para(doc, "Last updated 2026-04-28", italic=True, size=10)
     doc.add_paragraph()
 
@@ -705,14 +782,14 @@ def build_training():
 
     add_heading(doc, "Probate Voicemails", level=2)
     add_quote(doc,
-              f"Hi [first name], this is Zane with {COMPANY}. I'm reaching out about "
+              f"Hi [first name], this is [your name] with {COMPANY}. I'm reaching out about "
               f"[decedent first name]'s estate — sorry for your loss. I help families "
               f"in [county] navigate inherited properties. No pressure on this call — "
               f"I just want to make sure you know your options when you're ready. My "
               f"number is {PHONE}. Take care.",
               label="VM 1 — Day 1 (~25 sec)")
     add_quote(doc,
-              f"Hi [first name], Zane again. Just wanted to make myself available. "
+              f"Hi [first name], [your name] again. Just wanted to make myself available. "
               f"If you're sorting through what to do with the property and want a "
               f"second opinion or just info on the process, I'm happy to help — no "
               f"pressure, no pitch. {PHONE}. Talk soon.",
@@ -726,14 +803,14 @@ def build_training():
 
     add_heading(doc, "Foreclosure Voicemails", level=2)
     add_quote(doc,
-              f"Hi [first name], Zane here with {COMPANY}. I work with homeowners "
+              f"Hi [first name], [your name] here with {COMPANY}. I work with homeowners "
               f"going through the foreclosure process in [county]. I'm not calling "
               f"to sell you anything — I just want to make sure you know your "
               f"options. There's more than people realize, and most are free. "
               f"{PHONE}. Take care.",
               label="VM 1 — Day 1 (~25 sec)")
     add_quote(doc,
-              f"Hi [first name], Zane again. Quick one — if you're trying to keep "
+              f"Hi [first name], [your name] again. Quick one — if you're trying to keep "
               f"the house, there's free HUD help. If you're ready to walk away, "
               f"there are options too. Either way I'm happy to walk through it "
               f"with you. {PHONE}.",
@@ -755,34 +832,34 @@ def build_training():
 
     add_heading(doc, "Probate SMS Sequence", level=2)
     add_quote(doc,
-              f"Hi [first name], this is Zane with {COMPANY}. I left you a voicemail "
+              f"Hi [first name], this is [your name] with {COMPANY}. I left you a voicemail "
               f"about [decedent first name]'s estate. I help families with inherited "
               f"properties — no pressure, just info if you want it. Reply anytime.",
               label="SMS 1 — Day 1, after VM")
     add_quote(doc,
               "Hi [first name], following up. If you're sorting through what to do "
-              "with [property address], happy to walk through options no charge. -Zane",
+              "with [property address], happy to walk through options no charge. -[your name]",
               label="SMS 2 — Day 2")
     add_quote(doc,
               f"Hi [first name], last text from me unless you reach out. My number "
               f"is {LOCAL_PHONE} if you ever want to talk about [property address]. "
-              f"Take care. -Zane",
+              f"Take care. -[your name]",
               label="SMS 3 — Day 3")
 
     add_heading(doc, "Foreclosure SMS Sequence", level=2)
     add_quote(doc,
-              f"Hi [first name], Zane with {COMPANY}. I help homeowners in [county] "
+              f"Hi [first name], [your name] with {COMPANY}. I help homeowners in [county] "
               f"dealing with foreclosure. Not pitching anything — just options. "
               f"Reply if you want to know what they are.",
               label="SMS 1 — Day 1, after VM")
     add_quote(doc,
               "Hi [first name], if you're trying to keep the house, free HUD help "
               "exists. If you're ready to walk away, I can usually close before any "
-              "auction date. Either way I'm here. -Zane",
+              "auction date. Either way I'm here. -[your name]",
               label="SMS 2 — Day 2")
     add_quote(doc,
               f"Hi [first name], last text. Number's {LOCAL_PHONE} if you change your "
-              f"mind. Wishing you the best. -Zane",
+              f"mind. Wishing you the best. -[your name]",
               label="SMS 3 — Day 3")
 
     add_heading(doc, "Reply handling", level=2)
@@ -807,7 +884,7 @@ def build_training():
     add_para(doc, "Body:", bold=True)
     add_quote(doc,
               f"Hi [first name],\n\n"
-              f"I'm Zane with {COMPANY} in Cleveland. First — I'm sorry for your "
+              f"I'm [your name] with {COMPANY} in Cleveland. First — I'm sorry for your "
               f"loss. I came across [decedent first name]'s estate in the probate "
               f"court records and wanted to reach out.\n\n"
               f"I work with families in [county] navigating inherited properties. "
@@ -818,7 +895,7 @@ def build_training():
               f"If you'd like to talk through it (no pitch, just information), my "
               f"direct line is {PHONE}. Or visit {WEBSITE} if you'd rather check "
               f"us out first.\n\n"
-              f"Take care,\nZane")
+              f"Take care,\n[your name]")
 
     add_heading(doc, "Probate Email — Day 7 follow-up", level=2)
     add_para(doc, "Subject: RE: A quick note about [decedent first name]'s estate", bold=True)
@@ -833,7 +910,7 @@ def build_training():
               f"If you'd rather list it traditionally or hold onto it, I can "
               f"point you to people who can help with that too.\n\n"
               f"Either way, my direct line is {PHONE}.\n\n"
-              f"Take care,\nZane")
+              f"Take care,\n[your name]")
 
     add_heading(doc, "Foreclosure Email — Day 1", level=2)
     add_para(doc, "Subject: Quick note about [property address]", bold=True)
@@ -841,7 +918,7 @@ def build_training():
     add_para(doc, "Body:", bold=True)
     add_quote(doc,
               f"Hi [first name],\n\n"
-              f"I'm Zane with {COMPANY} in Cleveland. I came across the "
+              f"I'm [your name] with {COMPANY} in Cleveland. I came across the "
               f"foreclosure filing for [property address] in [county] court "
               f"records and wanted to reach out — not to pitch you anything, "
               f"but to make sure you know what your options are.\n\n"
@@ -857,7 +934,7 @@ def build_training():
               f"Each has trade-offs. Happy to walk through them with you — no "
               f"pitch, just information. Direct line: {PHONE}.\n\n"
               f"Either way, please don't let the auction date sneak up on you. "
-              f"Take care,\nZane")
+              f"Take care,\n[your name]")
 
     add_heading(doc, "Foreclosure Email — Day 7 follow-up", level=2)
     add_para(doc, "Subject: RE: Quick note about [property address]", bold=True)
@@ -873,7 +950,7 @@ def build_training():
               f"the number — I can have a written cash offer ready in 24 hours. "
               f"No obligation. You compare it to whatever else you're working on.\n\n"
               f"Direct line: {PHONE}.\n\n"
-              f"Take care,\nZane")
+              f"Take care,\n[your name]")
 
     return doc
 
@@ -892,7 +969,7 @@ def build_cheatsheet():
         section.right_margin = Inches(0.5)
 
     # Header
-    add_heading(doc, "Zane — Acquisitions Cheat Sheet", level=0)
+    add_heading(doc, "Acquisitions Cheat Sheet", level=0)
     add_para(doc, f"{COMPANY}  •  {PHONE}  •  {WEBSITE}", italic=True, size=11)
     doc.add_paragraph()
 
@@ -931,7 +1008,7 @@ def build_cheatsheet():
     p = doc.add_paragraph()
     p.paragraph_format.left_indent = Inches(0.2)
     run = p.add_run(
-        f'"Hi [name]? Zane with {COMPANY}. I noticed you\'re handling [decedent '
+        f'"Hi [name]? [your name] with {COMPANY}. I noticed you\'re handling [decedent '
         f'first name]\'s estate — I\'m sorry for your loss. I work with families '
         f'navigating inherited properties in [county]. Most folks aren\'t sure '
         f'what their options are. Got a couple minutes? I won\'t take long."'
@@ -945,7 +1022,7 @@ def build_cheatsheet():
     p = doc.add_paragraph()
     p.paragraph_format.left_indent = Inches(0.2)
     run = p.add_run(
-        f'"Hi [name]? Zane with {COMPANY}. I work with homeowners in [county] '
+        f'"Hi [name]? [your name] with {COMPANY}. I work with homeowners in [county] '
         f'dealing with the foreclosure process. Look — I\'m not calling to '
         f'pitch you anything. I just want to make sure you know what your '
         f'options are, because most people don\'t get told. Got a couple minutes?"'
@@ -1004,7 +1081,7 @@ def build_cheatsheet():
     # Footer
     doc.add_paragraph()
     add_para(doc,
-             f"Direct: {PHONE}  •  {WEBSITE}  •  Zane Acquisitions Cheat Sheet — "
+             f"Direct: {PHONE}  •  {WEBSITE}  •  Acquisitions Cheat Sheet — "
              f"Last updated 2026-04-28",
              italic=True, size=8)
 
@@ -1016,7 +1093,13 @@ def build_cheatsheet():
 # ─────────────────────────────────────────────────────────────────
 
 
-def build_onboarding():
+def build_process_retraining():
+    """For existing reps adopting new tools/scripts/cadence — NOT a full ramp.
+
+    Audience: someone who already calls leads competently but is migrating from
+    an older workflow to the Sift-driven setup (current scripts, STABM, the
+    13-preset niche sequential, Trestle scoring, etc.).
+    """
     doc = Document()
     for section in doc.sections:
         section.top_margin = Inches(0.7)
@@ -1025,32 +1108,204 @@ def build_onboarding():
         section.right_margin = Inches(0.8)
 
     # Cover
-    add_heading(doc, "Acquisitions Rep — Onboarding Checklist", level=0)
+    add_heading(doc, "Acquisitions Process Retraining Guide", level=0)
     add_para(doc, f"{COMPANY}  |  {PHONE}  |  {LOCAL_PHONE}  |  {WEBSITE}",
              italic=True, size=11)
-    add_para(doc, "Process-learning checklist for current Zane ramp + future hires",
+    add_para(doc, "For existing reps moving to the current Sift-driven workflow",
              italic=True, size=11)
-    add_para(doc, "Last updated 2026-04-28", italic=True, size=10)
+    add_para(doc, "Last updated 2026-04-29", italic=True, size=10)
     doc.add_paragraph()
 
     add_callout(doc,
-                "This checklist serves two purposes: (1) Zane's transition into the new "
-                "Sift-driven processes (he's not a new hire — he's learning new tools and "
-                "scripts). (2) A complete ramp for any future acquisitions hire so Sean "
-                "doesn't have to recreate the wheel.",
+                "Audience: existing acquisitions reps who already know how to call leads "
+                "and are now adopting new tools, scripts, and cadence. This is NOT a "
+                "from-scratch ramp — it's a migration guide for what's changing.",
+                color="info")
+    doc.add_paragraph()
+
+    # What's changing
+    add_heading(doc, "What's Changing", level=1)
+    add_para(doc, "The four big shifts in your daily work:")
+
+    changes = [
+        ("CRM",
+         "Old: Podio with custom workflows.",
+         "New: REI Sift (app.reisift.io). Properties / SiftLine boards / Sequences. "
+         "All historical data has been migrated."),
+        ("Scripts",
+         "Old: 'Are you interested in selling now or in the near future?' (Results-Driven style).",
+         "New: empathy-first openers per niche. Probate leads with grief. Foreclosure leads "
+         "with 'I'm not pitching you.' Generic openers get hung up on in distress niches."),
+        ("Cadence",
+         "Old: ad-hoc follow-ups.",
+         "New: Hot 1–2d / Warm 15d / Cold 45d. Niche-specific re-engagement (Auction 30d / "
+         "Probate 45d / General 90d). Touch sequence = email + SMS + call all phones + VM "
+         "+ Day-1 mailer = ONE attempt."),
+        ("Morning routine",
+         "Old: jump in and start dialing.",
+         "New: STABM 5-minute check (Status / Tasks / Assign / Board / Messages) before "
+         "first call every day."),
+    ]
+    add_table(doc, ["Area", "Was", "Now"], changes)
+    doc.add_paragraph()
+
+    # The 4 documents
+    add_heading(doc, "The 4 Reference Documents", level=1)
+    add_para(doc, "All four live in the team's shared folder. Print or bookmark all four.")
+    docs_table = [
+        ("Acquisitions SOP", "Daily routine per day, power hours, status mapping, KPIs, "
+                             "escalation rules. Read once end-to-end."),
+        ("Companion Training", "Tone, 16 objection-handling pairs, voicemail scripts, SMS "
+                               "templates, email templates. Reference for handling specific "
+                               "situations."),
+        ("Cheat Sheet", "One-page printable. Power hours, openers, status mapping, Trestle "
+                        "dial order. Keep on desk."),
+        ("This Retraining Guide", "What's changing — read once during your migration week, "
+                                  "then archive."),
+    ]
+    add_table(doc, ["Document", "Use"], docs_table)
+
+    # Migration timeline
+    add_pagebreak(doc)
+    add_heading(doc, "Your Migration Week", level=1)
+    add_para(doc, "Aggressive but realistic. By end of week, your daily flow runs entirely "
+                  "in the new system. No 4-week ramp — you already know the job.")
+
+    add_heading(doc, "Day 1 — Read + System Access", level=2)
+    add_bullet(doc, "Read the SOP cover-to-cover (~45 min). Note which sections feel new vs. familiar.")
+    add_bullet(doc, "Skim the Companion Training and bookmark the objection sections that feel useful.")
+    add_bullet(doc, "Print the Cheat Sheet (front + back). Tape it to your desk.")
+    add_bullet(doc, "Verify Sift access works. Pull up your Properties view and confirm migrated records are visible.")
+    add_bullet(doc, "Run STABM once on yesterday's records to feel the routine before tomorrow.")
+
+    add_heading(doc, "Day 2 — Run STABM Live, Use New Openers", level=2)
+    add_bullet(doc, "Start with the STABM check (5 min). It will feel slow on Day 2 — by Day 5 it's automatic.")
+    add_bullet(doc, "Use the probate + foreclosure openers verbatim today. Don't paraphrase — let the new "
+                    "language land on the seller before you adapt it.")
+    add_bullet(doc, "Apply 4 Pillars (Reason / Timeline / Condition / Price) on every contact. "
+                    "Note which pillar you tend to skip — that's your training edge.")
+    add_bullet(doc, "Update Property Status + next-step task after every call.")
+
+    add_heading(doc, "Day 3-5 — Settle In", level=2)
+    add_bullet(doc, "Continue STABM mornings. Time it — should drop from 8 min Day 2 to ~4 min by Day 5.")
+    add_bullet(doc, "Start improvising the openers in your own voice while keeping the empathy-first frame.")
+    add_bullet(doc, "Use SMS / email follow-ups from the templates. Reply to inbound within 1 minute.")
+    add_bullet(doc, "End each day with the daily KPI report to ownership (dials / RPC / offers / contracts).")
+
+    add_heading(doc, "End of week 1 review (with owner)", level=2)
+    add_bullet(doc, "Which scripts felt natural? Which felt forced?")
+    add_bullet(doc, "Where did STABM catch something that would have slipped?")
+    add_bullet(doc, "Any objection that came up that wasn't in the training doc → flag for owner to add")
+    add_bullet(doc, "Trestle dial order working? RPC rate moving up?")
+
+    # New behaviors checklist
+    add_pagebreak(doc)
+    add_heading(doc, "New Behaviors Checklist", level=1)
+    add_para(doc, "Tick each as it becomes automatic. By Week 4, all should feel like default behavior, "
+                  "not effort.")
+
+    behaviors = [
+        ("STABM run before any calls each day"),
+        ("Empathy-first opener on every probate call"),
+        ("'I'm not pitching you' opener on every foreclosure call"),
+        ("4 Pillars asked on every right-party contact (RPC)"),
+        ("Property Status updated immediately after every call"),
+        ("Next-step task set on every record before moving on"),
+        ("Trestle dial order respected (81-100 first, skip ≤40)"),
+        ("Inbound callback within 1 minute"),
+        ("SMS sent same-day after voicemail (one-two punch)"),
+        ("Daily KPI report sent to ownership"),
+        ("Recording self-review at least 1x per week"),
+    ]
+    for b in behaviors:
+        add_bullet(doc, b)
+
+    # In scope, with review
+    add_heading(doc, "In Scope — You Do First, Owner Reviews", level=1)
+    add_para(doc, "These are part of the role. You take a first pass; the owner reviews and "
+                  "revises before any number goes out to a seller. The point of you doing the "
+                  "analysis first is twofold: it builds your judgment over time, and it makes "
+                  "the owner's review faster than starting from scratch every deal.")
+    add_bullet(doc, "Comping / ARV — pull sold and listed comps yourself, identify finish levels "
+                    "and what they're commanding, determine as-is value AND/OR ARV. Owner reviews.")
+    add_bullet(doc, "Repair list + rehab guesstimate — collect needed repairs from the seller "
+                    "(condition questions in the 4 Pillars) and walk-through if you can. "
+                    "Take a swing at a rehab budget. Owner reviews and revises.")
+    add_bullet(doc, "Offer construction — propose the offer number to the owner based on your "
+                    "comp + rehab analysis. Owner approves before it goes to the seller. If "
+                    "the owner doesn't like the number, you re-evaluate together.")
+
+    # Out of scope (narrower)
+    add_heading(doc, "Out of Scope for the Acquisitions Role", level=1)
+    add_para(doc, "These genuinely sit with ownership — bring deals reaching these stages rather "
+                  "than handling solo:")
+    add_bullet(doc, "Transaction coordination (post-contract paperwork, title, closing)")
+    add_bullet(doc, "Disposition — selling under-contract deals to end buyers")
+    add_bullet(doc, "Marketing strategy / lead source decisions / data spend")
+
+    # Red flags
+    add_heading(doc, "Red Flags — Pause and Ask Owner", level=1)
+    add_bullet(doc, "30+ min on a call without progress on 4 Pillars")
+    add_bullet(doc, "Seller asks something you don't know — say 'let me get you a precise answer' and ask")
+    add_bullet(doc, "Legally complex situation (active eviction, untenanted tenants, title clouds, divorce mid-listing)")
+    add_bullet(doc, "Out-of-state heirs or PRs (probate cases spanning jurisdictions)")
+    add_bullet(doc, "Seller offers something off-script (creative financing, partial sale, lease-back)")
+    add_bullet(doc, "Pressure to offer above what feels right — pause, consult, respond")
+    add_bullet(doc, "Threats from seller (legal, regulatory, personal) — document + escalate immediately")
+
+    # Footer
+    doc.add_paragraph()
+    add_para(doc,
+             "Once the new behaviors are automatic (typically 2-4 weeks), this guide can be archived. "
+             "Daily reference moves to the SOP and Cheat Sheet. New objections or situations get added "
+             "to the Companion Training over time.",
+             italic=True, size=10)
+
+    return doc
+
+
+def build_onboarding():
+    """For NEW HIRES coming into the acquisitions role.
+
+    Trainer/supervisor = senior acquisitions rep (not the owner). Owner only
+    reviews/approves the rep's comp + rehab + offer numbers, and handles
+    ownership-only items (TC, disposition, marketing strategy).
+    """
+    doc = Document()
+    for section in doc.sections:
+        section.top_margin = Inches(0.7)
+        section.bottom_margin = Inches(0.7)
+        section.left_margin = Inches(0.8)
+        section.right_margin = Inches(0.8)
+
+    # Cover
+    add_heading(doc, "New Hire Onboarding Checklist — Acquisitions", level=0)
+    add_para(doc, f"{COMPANY}  |  {PHONE}  |  {LOCAL_PHONE}  |  {WEBSITE}",
+             italic=True, size=11)
+    add_para(doc, "Day 1 → Month 3 ramp under the senior acquisitions rep",
+             italic=True, size=11)
+    add_para(doc, "Last updated 2026-04-29", italic=True, size=10)
+    doc.add_paragraph()
+
+    add_callout(doc,
+                "Trainer / supervisor = the senior acquisitions rep. They run shadow sessions, "
+                "review your recordings, give daily feedback, and sign off on milestones. "
+                "Ownership reviews and approves the rep's comp + rehab + offer numbers "
+                "before they go to a seller, and handles ownership-only items: transaction "
+                "coordination, disposition, marketing strategy / data spend.",
                 color="warn")
     doc.add_paragraph()
 
     # Day 1
     add_heading(doc, "Day 1 — Setup + Read", level=1)
-    add_para(doc, "Goal: Understand the system and have all access in place before making any calls.",
+    add_para(doc, "Goal: Get all access set up and absorb the four reference documents before any calls.",
              italic=True)
-    add_heading(doc, "Access checklist", level=2)
-    add_bullet(doc, "Sift / DataSift login received from Sean — log in, change password, enable 2FA")
-    add_bullet(doc, "smrtPhone login received — log in, verify both numbers route to Zane (toll-free + local)")
-    add_bullet(doc, "Email account set up (Zane@alworthhomes.com or equivalent)")
+    add_heading(doc, "Access checklist (set up by ownership ahead of Day 1)", level=2)
+    add_bullet(doc, "Sift / DataSift login — log in, change password, enable 2FA")
+    add_bullet(doc, "smrtPhone login — log in, verify both numbers route to you (toll-free + local)")
+    add_bullet(doc, "Email account ([firstname]@alworthhomes.com)")
     add_bullet(doc, "Calendar set up + connected to Sift / Google for appointment booking")
-    add_bullet(doc, "Slack / phone access for direct line to Sean for escalations")
+    add_bullet(doc, "Phone access (Slack / SMS / cell) for direct line to senior rep + ownership for escalations")
 
     add_heading(doc, "Read in this order (~3 hours)", level=2)
     add_numbered(doc, "Acquisitions SOP (full read — daily routine, scripts, status mapping, KPIs)")
@@ -1058,65 +1313,65 @@ def build_onboarding():
     add_numbered(doc, "Cheat Sheet (memorize the openers — print and keep at desk)")
     add_numbered(doc, "Sift's own niche-sequential help article: intercom.help/reisift/en/articles/12543919")
 
-    add_heading(doc, "Shadow / observe (~2 hours)", level=2)
-    add_bullet(doc, "Sit with Sean during 5–10 live calls (probate + foreclosure mix)")
-    add_bullet(doc, "Watch how Sean handles status updates + next-step task assignment in Sift")
+    add_heading(doc, "Shadow the senior rep (~2 hours)", level=2)
+    add_bullet(doc, "Sit with the senior rep during 5–10 live calls (probate + foreclosure mix)")
+    add_bullet(doc, "Watch how they handle status updates + next-step task assignment in Sift")
     add_bullet(doc, "Observe at least one full power-hour block")
-    add_bullet(doc, "Listen to 3–5 recorded calls from prior runs (good ones + at-least-one bad one)")
+    add_bullet(doc, "Listen to 3–5 recorded calls (good ones + at least one bad one with notes from the senior rep)")
 
     # Week 1
     add_pagebreak(doc)
-    add_heading(doc, "Week 1 — Live Calls (Supervised)", level=1)
-    add_para(doc, "Goal: First 50 supervised calls. Sean reviews each day's recordings and gives "
-                  "feedback. By Friday, you should be solo on most calls.", italic=True)
+    add_heading(doc, "Week 1 — Live Calls + Daily Feedback", level=1)
+    add_para(doc, "Goal: First ~50 live calls with daily feedback from the senior rep. By Friday, "
+                  "you're solo on most calls and the senior rep spot-checks recordings rather than "
+                  "listening live.", italic=True)
 
-    add_heading(doc, "Daily (Mon–Fri this week)", level=2)
-    add_bullet(doc, "Run preset '02. Ready to Call' first thing — work fresh FTM with Sean listening")
-    add_bullet(doc, "Memorize and use the probate + foreclosure openers EXACTLY (don't paraphrase yet)")
-    add_bullet(doc, "Apply 4 Pillars on every contact — even if it feels mechanical at first")
-    add_bullet(doc, "Update Property Status + next-step task after every call before moving on")
-    add_bullet(doc, "End-of-day: send daily KPI to Sean (dials / RPC / offers / contracts)")
-    add_bullet(doc, "End-of-day: review 1 recorded call together for 15 minutes")
+    add_heading(doc, "Daily (Mon–Fri)", level=2)
+    add_bullet(doc, "Run STABM (5 min) before any calls")
+    add_bullet(doc, "Run preset '02. Ready to Call' for fresh FTM — work it with the senior rep listening")
+    add_bullet(doc, "Use the probate + foreclosure openers EXACTLY (no paraphrasing yet)")
+    add_bullet(doc, "Apply 4 Pillars on every contact — even if it feels mechanical")
+    add_bullet(doc, "Update Property Status + next-step task after every call")
+    add_bullet(doc, "End-of-day: send daily KPI to senior rep (dials / RPC / offers / contracts)")
+    add_bullet(doc, "End-of-day: 15-min recording review with senior rep")
 
-    add_heading(doc, "Week 1 milestones", level=2)
+    add_heading(doc, "Week 1 milestones (signed off by senior rep)", level=2)
     week1 = [
         ("By Day 2", "First RPC (right party contact) on a probate AND a foreclosure lead"),
-        ("By Day 3", "Apply 4 Pillars unprompted (no Sean cue) on at least 3 calls"),
-        ("By Day 4", "Make first cash offer to a qualified lead"),
-        ("By Day 5", "Solo on power-hour blocks. Sean spot-checks the recordings, not live."),
+        ("By Day 3", "Apply 4 Pillars unprompted (no senior-rep cue) on at least 3 calls"),
+        ("By Day 4", "Make first cash offer to a qualified lead (with senior rep on standby)"),
+        ("By Day 5", "Solo on power-hour blocks. Senior rep spot-checks recordings, not live."),
     ]
     add_table(doc, ["Milestone", "What it looks like"], week1)
 
     # Month 1
     add_pagebreak(doc)
     add_heading(doc, "Month 1 — Independent Operation", level=1)
-    add_para(doc, "Goal: Hit baseline KPIs independently. Sean only escalates when needed.",
+    add_para(doc, "Goal: Hit baseline KPIs solo. Senior rep escalates only when needed.",
              italic=True)
 
     add_heading(doc, "Week 2", level=2)
-    add_bullet(doc, "All call blocks solo. Daily KPI report to Sean still required.")
-    add_bullet(doc, "Start tracking your own scripted-vs-improvised ratio — by end of week 2, "
-                    "you should be improvising on context (50% your words, 50% scripted) but "
-                    "still hitting all 4 Pillars without skipping.")
-    add_bullet(doc, "First contract under contract (with Sean walking you through paperwork)")
+    add_bullet(doc, "All call blocks solo. Daily KPI report still goes to senior rep.")
+    add_bullet(doc, "Track scripted-vs-improvised ratio — by end of week, ~50/50 with all 4 Pillars hit unprompted")
+    add_bullet(doc, "First contract written (senior rep walks you through paperwork; ownership signs)")
 
     add_heading(doc, "Week 3", level=2)
     add_bullet(doc, "KPI baseline: 50+ dials/day on full days, 30+ on split days")
-    add_bullet(doc, "RPC rate climbing toward 1-in-10 with Trestle scoring (vs 1-in-32 baseline)")
-    add_bullet(doc, "Manage your own Sift task queue without Sean's daily intervention")
-    add_bullet(doc, "Run weekly KPI report with Sean (Friday afternoon, 30 min)")
+    add_bullet(doc, "RPC rate climbing toward 1-in-10 with Trestle scoring")
+    add_bullet(doc, "Manage your own Sift task queue without daily senior-rep intervention")
+    add_bullet(doc, "Weekly KPI review with senior rep (Friday afternoon, 30 min)")
 
     add_heading(doc, "Week 4", level=2)
     add_bullet(doc, "Daily targets at upper end (80–100 dials on Tue/Wed/Thu)")
     add_bullet(doc, "5+ offers made in the week")
-    add_bullet(doc, "First fully-solo contract closed (handoff to Sean for transaction coordination)")
-    add_bullet(doc, "End-of-month review with Sean — what's working, what's broken, what to adjust")
+    add_bullet(doc, "First fully-solo contract closed (handoff to ownership for transaction coordination)")
+    add_bullet(doc, "End-of-month review with senior rep + ownership — what's working, what to adjust")
 
     # Month 3
     add_pagebreak(doc)
     add_heading(doc, "Month 3 — Mastery Checkpoints", level=1)
-    add_para(doc, "Goal: You can run the entire acquisitions function without Sean's day-to-day "
-                  "involvement. Sean reviews weekly KPIs only.", italic=True)
+    add_para(doc, "Goal: Run the entire acquisitions function without daily senior-rep involvement. "
+                  "Senior rep reviews weekly KPIs, ownership reviews monthly.", italic=True)
 
     add_heading(doc, "Performance baselines (must hit by end of Month 3)", level=2)
     perf = [
@@ -1132,49 +1387,58 @@ def build_onboarding():
     add_table(doc, ["Metric", "Target"], perf)
 
     add_heading(doc, "Soft-skill checkpoints", level=2)
-    add_bullet(doc, "Handle unexpected objections without consulting the script (you've internalized the patterns)")
+    add_bullet(doc, "Handle unexpected objections without consulting the script")
     add_bullet(doc, "Identify motivated sellers in the first 30 seconds of a call")
-    add_bullet(doc, "Negotiate offers within your authority — pull Sean in only for genuinely-edge cases")
-    add_bullet(doc, "Maintain Sift status accuracy without prompts (every record always has a next-step)")
-    add_bullet(doc, "Respond to inbound within 1 minute even during admin / breaks")
+    add_bullet(doc, "Negotiate offers within authority — pull senior rep / ownership only for genuine edge cases")
+    add_bullet(doc, "Maintain Sift status accuracy without prompts")
+    add_bullet(doc, "Inbound callback within 1 minute even during admin / breaks")
 
-    add_heading(doc, "What you should NOT have learned to do (yet)", level=2)
-    add_para(doc, "These are explicitly Sean's lane until further notice:", italic=True)
+    add_heading(doc, "In scope — you do first, owner reviews", level=2)
+    add_para(doc, "These are part of the role. You take a first pass; ownership reviews and "
+                  "revises before any number reaches the seller:", italic=True)
+    add_bullet(doc, "Comping / ARV — pull sold and listed comps yourself, identify finish levels and "
+                    "what they're commanding, determine as-is and/or ARV. Owner reviews.")
+    add_bullet(doc, "Repair list + rehab guesstimate — collect needed repairs from the 4 Pillars "
+                    "condition questions (or walk-through if you have one) and propose a rehab "
+                    "budget. Owner reviews and revises.")
+    add_bullet(doc, "Offer construction — propose the offer number based on your comp + rehab "
+                    "analysis. Owner approves before it goes to the seller. If owner doesn't like "
+                    "the number, you re-evaluate together.")
+
+    add_heading(doc, "Out of scope for the acquisitions role (handled by ownership)", level=2)
+    add_para(doc, "These genuinely sit with ownership — bring deals reaching these stages rather "
+                  "than handling solo:", italic=True)
     add_bullet(doc, "Transaction coordination (post-contract paperwork, title, closing)")
-    add_bullet(doc, "Comping / ARV — you make offers based on Sean's MAO ranges, not your own comps")
-    add_bullet(doc, "Rehab estimating — same. Sean provides the number you offer against.")
     add_bullet(doc, "Disposition — selling under-contract deals to end buyers")
-    add_bullet(doc, "Marketing strategy / lead source decisions")
+    add_bullet(doc, "Marketing strategy / lead source decisions / data spend")
 
     # Continuous learning
     add_heading(doc, "Continuous learning (every week, indefinitely)", level=1)
     add_bullet(doc, "Listen to 1 of your own recorded calls per week — note what worked, what didn't")
     add_bullet(doc, "Read 1 case study from datasift.ai/case-studies — see how other operators handle similar situations")
-    add_bullet(doc, "Weekly KPI review with Sean (30 min Friday)")
-    add_bullet(doc, "Monthly script-tuning session — what objections are coming up that aren't in the training doc?")
+    add_bullet(doc, "Weekly KPI review with senior rep (30 min Friday)")
+    add_bullet(doc, "Monthly script-tuning session — what objections came up that aren't in the training doc?")
     add_bullet(doc, "Quarterly: read the latest Ty content for any cadence/script updates")
 
-    # Red flags / when to ask
+    # Red flags
     add_pagebreak(doc)
-    add_heading(doc, "Red flags — pause and ask Sean", level=1)
-    add_bullet(doc, "You've talked to a seller for 30+ minutes without making progress on the 4 Pillars")
-    add_bullet(doc, "A seller asks you a question you don't know the answer to — "
-                    "say 'great question, let me get you a precise answer' and ask Sean")
-    add_bullet(doc, "Anything legally weird (eviction in progress, property has tenants without leases, "
-                    "title clouds, divorce mid-listing)")
-    add_bullet(doc, "Out-of-state heirs or PRs (probate cases that span jurisdictions)")
-    add_bullet(doc, "Seller offers you something off-script (creative financing, partial sale, etc.)")
-    add_bullet(doc, "You feel pressured to make an offer above what feels right — pause, "
-                    "consult Sean, then respond")
-    add_bullet(doc, "A seller threatens to sue, calls regulators, or threatens you personally — "
-                    "document and escalate immediately")
+    add_heading(doc, "Red Flags — Pause and Escalate", level=1)
+    add_para(doc, "Escalate to the senior rep first. They escalate to ownership for ownership-level decisions.",
+             italic=True)
+    add_bullet(doc, "30+ min on a call without progress on 4 Pillars")
+    add_bullet(doc, "Seller asks a question you don't know — say 'let me get you a precise answer' and check with senior rep")
+    add_bullet(doc, "Legally complex situation (active eviction, untenanted tenants, title clouds, divorce mid-listing)")
+    add_bullet(doc, "Out-of-state heirs or PRs (probate cases spanning jurisdictions)")
+    add_bullet(doc, "Seller offers something off-script (creative financing, partial sale, lease-back)")
+    add_bullet(doc, "Pressure to offer above what feels right — pause, consult, respond")
+    add_bullet(doc, "Seller threatens (legal, regulatory, personal) — document + escalate immediately")
 
     # Footer
     doc.add_paragraph()
     add_para(doc,
              "If something isn't covered in any of the four documents (SOP, Companion Training, "
              "Cheat Sheet, this Onboarding Checklist) — that's a signal we need to write it down. "
-             "Tell Sean and we'll add it.",
+             "Tell the senior rep and we'll add it.",
              italic=True, size=10)
 
     return doc
@@ -1183,10 +1447,11 @@ def build_onboarding():
 def main():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     for name, builder in [
-        ("Zane_Acquisitions_SOP.docx", build_sop),
-        ("Zane_Companion_Training.docx", build_training),
-        ("Zane_Cheat_Sheet.docx", build_cheatsheet),
-        ("Acquisitions_Onboarding_Checklist.docx", build_onboarding),
+        ("Acquisitions_SOP.docx", build_sop),
+        ("Acquisitions_Companion_Training.docx", build_training),
+        ("Acquisitions_Cheat_Sheet.docx", build_cheatsheet),
+        ("Process_Retraining_Guide.docx", build_process_retraining),
+        ("New_Hire_Onboarding_Checklist.docx", build_onboarding),
     ]:
         path = OUTPUT_DIR / name
         doc = builder()

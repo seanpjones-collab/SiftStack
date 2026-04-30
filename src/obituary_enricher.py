@@ -92,6 +92,165 @@ def _set_enrichment_state(notices: list) -> None:
     _CURRENT_STATE_CODE = "TN"
 
 
+# ── Cross-run obit cache (named Apify KVS) ───────────────────────────────
+#
+# Without persistence, every daily run re-searches every owner name from
+# scratch — even names we've already proven deceased on a prior run. With
+# the residential proxy IPs throttled by Brave/Mojeek (and the slow Yandex
+# fallback), obit phase has been clocking 30-40 min for ~50 owners. A
+# (name, state) → result cache backed by a NAMED KVS lets multi-day
+# foreclosure cases (which sit in the docket for weeks) skip the search
+# entirely on subsequent runs, cutting obit phase to a few minutes for
+# all but the freshly-filed names.
+#
+# Storage: one named KVS, one record (full cache as JSON dict). On Apify
+# failures (no token, KVS API down) we silently fall back to the original
+# in-memory-only behavior — caching is best-effort, never required.
+
+_OBIT_CACHE_STORE_NAME = "siftstack-obit-cache"
+_OBIT_CACHE_KEY = "obit_cache"
+_OBIT_HIT_TTL_DAYS = 365   # confirmed obits don't change once published
+_OBIT_MISS_TTL_DAYS = 30   # re-search misses periodically — newly indexed obits
+_APIFY_API_BASE = "https://api.apify.com/v2"
+
+
+def _get_or_create_obit_kvs_id(token: str) -> str | None:
+    """Return Apify KVS id for the obit cache, creating the store if missing."""
+    try:
+        r = requests.post(
+            f"{_APIFY_API_BASE}/key-value-stores",
+            params={"token": token, "name": _OBIT_CACHE_STORE_NAME},
+            timeout=15,
+        )
+        r.raise_for_status()
+        return r.json()["data"]["id"]
+    except Exception as e:
+        logger.warning("Obit cache KVS lookup failed: %s", e)
+        return None
+
+
+def _load_persistent_obit_cache(
+    state_code: str,
+) -> tuple[dict[str, tuple[dict, str, str] | None], str | None]:
+    """Load obit cache from named Apify KVS, filtered by state and TTL.
+
+    Returns (cache_dict, store_id). store_id is None on any failure — caller
+    skips persisting on save when store_id is None. Cache shape matches the
+    in-memory search_cache: normalized_name → (parsed, url, source) | None.
+    """
+    token = os.environ.get("APIFY_TOKEN") or os.environ.get("APIFY_API_TOKEN")
+    if not token:
+        logger.debug("Obit cache: no APIFY_TOKEN — persistence disabled")
+        return {}, None
+
+    store_id = _get_or_create_obit_kvs_id(token)
+    if not store_id:
+        return {}, None
+
+    try:
+        r = requests.get(
+            f"{_APIFY_API_BASE}/key-value-stores/{store_id}/records/{_OBIT_CACHE_KEY}",
+            params={"token": token},
+            timeout=20,
+        )
+        if r.status_code == 404:
+            return {}, store_id
+        r.raise_for_status()
+        payload = r.json()
+    except Exception as e:
+        logger.warning("Obit cache load failed: %s", e)
+        return {}, store_id
+
+    if not isinstance(payload, dict):
+        return {}, store_id
+
+    cutoff_hit = time.time() - (_OBIT_HIT_TTL_DAYS * 86400)
+    cutoff_miss = time.time() - (_OBIT_MISS_TTL_DAYS * 86400)
+    out: dict[str, tuple[dict, str, str] | None] = {}
+    state_prefix = f"{state_code}|"
+    for k, v in payload.items():
+        if not isinstance(k, str) or not k.startswith(state_prefix):
+            continue
+        if not isinstance(v, dict):
+            continue
+        ts = v.get("ts", 0)
+        is_miss = v.get("hit") is False
+        if is_miss and ts < cutoff_miss:
+            continue
+        if not is_miss and ts < cutoff_hit:
+            continue
+        cache_key = k[len(state_prefix):]
+        if is_miss:
+            out[cache_key] = None
+        else:
+            parsed = v.get("parsed", {})
+            url = v.get("url", "")
+            source = v.get("source", "")
+            out[cache_key] = (parsed, url, source)
+    return out, store_id
+
+
+def _save_persistent_obit_cache(
+    state_code: str,
+    cache: dict[str, tuple[dict, str, str] | None],
+    store_id: str | None,
+) -> None:
+    """Persist obit cache to named Apify KVS, merging with what's already there.
+
+    The merge step matters: a parallel run for a different state writing
+    its own entries into the same record would otherwise overwrite ours.
+    Re-fetch the live record, overlay our state's keys, write back.
+    """
+    if not store_id:
+        return
+    token = os.environ.get("APIFY_TOKEN") or os.environ.get("APIFY_API_TOKEN")
+    if not token:
+        return
+
+    existing: dict = {}
+    try:
+        r = requests.get(
+            f"{_APIFY_API_BASE}/key-value-stores/{store_id}/records/{_OBIT_CACHE_KEY}",
+            params={"token": token},
+            timeout=20,
+        )
+        if r.status_code == 200:
+            payload = r.json()
+            if isinstance(payload, dict):
+                existing = payload
+    except Exception:
+        pass
+
+    now = time.time()
+    state_prefix = f"{state_code}|"
+    for k, v in cache.items():
+        full_key = f"{state_prefix}{k}"
+        if v is None:
+            existing[full_key] = {"hit": False, "ts": now}
+        else:
+            parsed, url, source = v
+            existing[full_key] = {
+                "hit": True, "ts": now,
+                "parsed": parsed, "url": url, "source": source,
+            }
+
+    try:
+        r = requests.put(
+            f"{_APIFY_API_BASE}/key-value-stores/{store_id}/records/{_OBIT_CACHE_KEY}",
+            params={"token": token},
+            headers={"Content-Type": "application/json"},
+            data=json.dumps(existing),
+            timeout=30,
+        )
+        r.raise_for_status()
+        logger.info(
+            "Obit cache: persisted %d entries to KVS (total %d in store)",
+            len(cache), len(existing),
+        )
+    except Exception as e:
+        logger.warning("Obit cache save failed: %s", e)
+
+
 def _dod_sanity_check(dod_str: str, notice: "NoticeData") -> bool:
     """Reject obituary matches where DOD is implausibly far from the notice date.
 
@@ -465,8 +624,13 @@ def _search_obituary(name: str, city: str, extra_terms: str = "") -> list[dict]:
         else f'{name} {keyword} {city} {state_name}'
     )
 
+    # Backend whitelist: ddgs's "google" is gone (KeyError → falls to "auto"
+    # which retries every available backend including the broken ones).
+    # On Apify residential proxy IPs, brave returns 429 and mojeek returns
+    # 403 every time. Pinning to working backends only cuts obit phase from
+    # ~40 min back to ~5 min on a 50-record run.
     try:
-        results = DDGS().text(query, max_results=8, backend="google,duckduckgo,brave")
+        results = DDGS().text(query, max_results=8, backend="duckduckgo,yandex,wikipedia,yahoo")
     except Exception as e:
         logger.debug("Search failed for '%s': %s", query, e)
         return []
@@ -631,7 +795,7 @@ def _refetch_specific_obituary(
 
     for query in queries:
         try:
-            results = DDGS().text(query, max_results=5, backend="google,duckduckgo,brave")
+            results = DDGS().text(query, max_results=5, backend="duckduckgo,yandex,wikipedia,yahoo")
         except Exception:
             continue
 
@@ -724,7 +888,7 @@ def _search_survivors_targeted(
     all_snippets = []
     for query in queries:
         try:
-            results = DDGS().text(query, max_results=5, backend="google,duckduckgo,brave")
+            results = DDGS().text(query, max_results=5, backend="duckduckgo,yandex,wikipedia,yahoo")
             for r in results:
                 snippet = r.get("body", "")
                 title = r.get("title", "")
@@ -900,7 +1064,7 @@ def _lookup_dm_address_web(name: str, city: str, api_key: str) -> dict | None:
 
     for query in queries:
         try:
-            results = DDGS().text(query, max_results=5, backend="google,duckduckgo,brave")
+            results = DDGS().text(query, max_results=5, backend="duckduckgo,yandex,wikipedia,yahoo")
         except Exception:
             time.sleep(random.uniform(SEARCH_DELAY_MIN, SEARCH_DELAY_MAX))
             continue
@@ -2266,8 +2430,15 @@ def enrich_obituary_data(
     logger.info("Phase A: Searching obituaries for %d property owners...", len(candidates))
 
     # Search result cache: normalized_name → (parsed, url, source_type) or None (miss)
-    # Prevents duplicate DDG + LLM calls when the same owner appears on multiple notices
-    search_cache: dict[str, tuple[dict, str, str] | None] = {}
+    # Prevents duplicate DDG + LLM calls when the same owner appears on multiple notices.
+    # Cross-run persistence comes from a named Apify KVS — see _load/_save above.
+    state_code = (_CURRENT_STATE_CODE or "TN").upper()
+    search_cache, _obit_cache_store_id = _load_persistent_obit_cache(state_code)
+    if search_cache:
+        logger.info(
+            "Obit cache: loaded %d entries from prior runs (state=%s)",
+            len(search_cache), state_code,
+        )
     cache_hits = 0
 
     confirmed = 0
@@ -2519,6 +2690,12 @@ def enrich_obituary_data(
         confirmed, probate_preset_count, searched, skipped, cache_hits,
         miss_no_results, miss_fetch_failed, miss_llm_rejected,
     )
+
+    # Persist this run's search outcomes (hits + confirmed misses) to the
+    # named Apify KVS so tomorrow's run can skip the work for any name
+    # we've already resolved. Save here (post-Phase A) so even if Phase B
+    # or downstream enrichment fails, we don't lose the obit work.
+    _save_persistent_obit_cache(state_code, search_cache, _obit_cache_store_id)
 
     # ── Phase A.5: Ancestry fallback for unresolved candidates ─────────
     # Only search Ancestry for candidates that Phase A couldn't confirm.

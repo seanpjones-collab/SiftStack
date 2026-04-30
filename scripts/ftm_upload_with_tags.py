@@ -286,14 +286,27 @@ def concat_apr_24(local_files: list[Path], out_path: Path) -> int:
 
 
 async def upload_lists(csv_paths: list[tuple[str, Path]]) -> dict:
-    """Upload each CSV as a new disposable per-day list. Records auto-join
-    `First to Market (FTM)` and notice-type lists via the CSV Lists column."""
+    """Upload to the stable `First to Market (FTM)` list. Records auto-join
+    their notice-type list ("Foreclosure"/"Probate") via the CSV Lists column.
+
+    Why a single stable list instead of per-day lists:
+      The earlier "OH FTM YYYY-MM-DD" per-day Step-1 list was creating list
+      proliferation — every record also got pulled into `First to Market
+      (FTM)` + its notice-type list via the CSV Lists column, so a record
+      that appeared on N daily uploads ended up in N + 2 lists. Sean caught
+      this on 2026-04-29 with records showing 5+ list memberships.
+
+      Pointing Step-1 at the same FTM list the CSV already targets means
+      records cap at exactly 2 lists (FTM + notice-type). The "what came
+      in on YYYY-MM-DD" slice is still queryable via the YYYY-MM date tag
+      that datasift_formatter writes for every record.
+    """
     import sys
     sys.path.insert(0, str(REPO / "src"))
     from datasift_uploader import upload_datasift_split
 
     csv_infos = [
-        {"path": p, "label": label, "list_name": label}  # list_name = per-day label
+        {"path": p, "label": label, "list_name": "First to Market (FTM)"}
         for label, p in csv_paths
     ]
     return await upload_datasift_split(
@@ -301,7 +314,7 @@ async def upload_lists(csv_paths: list[tuple[str, Path]]) -> dict:
         headless=False,  # let Sean watch the upload
         enrich=True,
         skip_trace=True,
-        existing_list=False,  # "Uploading a new list not in DataSift yet" mode
+        existing_list=True,  # "Adding properties to an existing list" mode
         step2_custom_tag=None,  # CSV Tags column already has Courthouse Data
         do_manual_column_mapping=True,  # Tags + Lists never auto-map for Sean's account
     )

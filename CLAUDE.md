@@ -452,6 +452,32 @@ plugin-name.plugin (ZIP containing):
 └── README.md
 ```
 
+## Deal Analysis Auto-Publish
+
+Comp / rehab / deal-analyzer outputs auto-publish to OneDrive + the **#deals** Slack channel via a Stop hook (`.claude/settings.json`) that runs `scripts/auto_publish_pending.py`.
+
+**Convention — write a single payload per analysis:**
+
+When you finish a comp / rehab / deal-analyzer run, save the Excel(s) into `output/reports/{slug}/` and write **one consolidated** `output/reports/{slug}/publish.json`:
+
+```json
+{
+  "address": "<full street, city, state, zip>",
+  "slug": "<address kebab-cased, e.g. 336-james-ave-akron-44306>",
+  "summary": "<Slack message body — markdown OK; lead with finding + recommendation>",
+  "reports": [
+    {"path": "output/reports/{slug}/comp_report.xlsx", "label": "Comp Report"},
+    {"path": "output/reports/{slug}/rehab_report.xlsx", "label": "Rehab Report"}
+  ]
+}
+```
+
+**De-dup rule:** Even when all three skills run together, write **one** `publish.json` with both reports listed. The hook publishes that single payload as one Slack message. Don't write per-skill payloads.
+
+**Channel routing:** Uses `SLACK_DEALS_HOOK_URL` exclusively. Never falls back to `SLACK_WEBHOOK_URL` (that one points at the FTM channel for daily run summaries — deal analyses must not land there).
+
+**To skip publishing on a particular run:** delete or don't write `publish.json`. After publish, the script renames it to `publish.published.json` so it isn't re-sent.
+
 ## My Defaults
 
 - **Primary geography:** Ohio — Cuyahoga / Summit / Stark (all three counties run every morning; Summit is the acquisitions focus for doorknocking/field work, but data pulls cover the full set)

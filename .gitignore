@@ -59,7 +59,10 @@ Thumbs.db
 *.swp
 
 # Claude Code / planning
-.claude/
+.claude/*
+!.claude/skills/
+!.claude/memory/
+!.claude/README.md
 .planning/
 .playwright-mcp/
 

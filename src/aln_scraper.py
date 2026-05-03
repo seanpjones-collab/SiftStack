@@ -135,6 +135,26 @@ def _text(el: Tag | None) -> str:
     return el.get_text(" ", strip=True) if el else ""
 
 
+_CASE_NO_RAW_RE = re.compile(r"\bCV[-\s]?(\d{4})[-\s]?(\d{2})[-\s]?(\d{4})\b",
+                             re.IGNORECASE)
+
+
+def _canonical_aln_case_no(raw: str) -> str:
+    """ALN's `<span class="notice_case_number">` ships with whitespace
+    separators ('CV2026 03 1187'). Normalize to the same hyphenated form
+    Summit clerkweb emits ('CV-2026-03-1187') so cross-source unification
+    and cross-run dedup compare apples to apples.
+
+    Returns '' if the raw string doesn't match a CV pattern.
+    """
+    if not raw:
+        return ""
+    m = _CASE_NO_RAW_RE.search(raw)
+    if not m:
+        return ""
+    return f"CV-{m.group(1)}-{m.group(2)}-{m.group(3)}"
+
+
 def _extract_publication_date(run_dates: str) -> str:
     """Parse first date from a run_dates string like 'Apr 16, 23, 30; May 7, 14, 21, 2026'.
 
@@ -245,6 +265,28 @@ def _parse_foreclosure(div: Tag, source_url: str) -> NoticeData | None:
     # Owner name: strip common suffixes from defendant
     owner = _clean_defendant(defendant)
 
+    # Canonicalize the court case number ("CV2026 03 1187" → "CV-2026-03-1187")
+    # so cross-source unification (summit_foreclosure_scraper) and cross-run
+    # dedup (main.py::_case_key) can both find it. Embedded in source_url as
+    # a query param keeps it discoverable by the case_no=... regex used
+    # elsewhere; the ALN ref stays as the URL fragment for human navigation.
+    canonical_case = _canonical_aln_case_no(case_no)
+    if canonical_case:
+        url_with_case = f"{source_url}?case_no={canonical_case}"
+    else:
+        url_with_case = source_url
+    final_url = f"{url_with_case}#{aln_ref}" if aln_ref else url_with_case
+
+    # Prefix raw_text with structured tags so downstream regex extraction
+    # of case_no/lender works even if URL formatting ever drifts.
+    prefix_parts = []
+    if canonical_case:
+        prefix_parts.append(f"[Case: {canonical_case}]")
+    if plaintiff:
+        prefix_parts.append(f"[Lender: {plaintiff}]")
+    prefix = " ".join(prefix_parts)
+    raw_text = f"{prefix} {body}".strip() if prefix else body
+
     return NoticeData(
         date_added=pub_date,
         address=address,
@@ -254,8 +296,8 @@ def _parse_foreclosure(div: Tag, source_url: str) -> NoticeData | None:
         owner_name=owner,
         notice_type="foreclosure",
         county="Summit",
-        source_url=f"{source_url}#{aln_ref}" if aln_ref else source_url,
-        raw_text=body[:4000],  # cap to keep CSV sane
+        source_url=final_url,
+        raw_text=raw_text[:4000],  # cap to keep CSV sane
         parcel_id=parcel,
     )
 
@@ -305,6 +347,16 @@ def _parse_probate(div: Tag, source_url: str) -> NoticeData | None:
 
     pub_date = _extract_publication_date(run_dates)
 
+    # Same case-no canonicalization as foreclosure path. Probate's body
+    # (from `_text(div)`) already contains the case number incidentally,
+    # but explicit URL embedding makes cross-source dedup deterministic.
+    canonical_case = _canonical_aln_case_no(case_no)
+    if canonical_case:
+        url_with_case = f"{source_url}?case_no={canonical_case}"
+    else:
+        url_with_case = source_url
+    final_url = f"{url_with_case}#{aln_ref}" if aln_ref else url_with_case
+
     return NoticeData(
         date_added=pub_date,
         state="OH",
@@ -312,7 +364,7 @@ def _parse_probate(div: Tag, source_url: str) -> NoticeData | None:
         decedent_name=decedent,
         notice_type="probate",
         county="Summit",
-        source_url=f"{source_url}#{aln_ref}" if aln_ref else source_url,
+        source_url=final_url,
         raw_text=body[:4000],
     )
 

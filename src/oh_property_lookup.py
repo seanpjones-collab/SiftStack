@@ -11,10 +11,14 @@ Coverage:
   Stark    — realestate.starkcountyohio.gov (IasWorld / Tyler commonsearch.aspx,
              ASP.NET WebForms — disclaimer POST then owner search POST,
              then one Datalet.aspx GET for full city/zip)
-  Summit   — NOT IMPLEMENTED. Summit probate already emits property addresses
-             directly from CourtView eServices case-detail pages, so lookup
-             is unnecessary. (fiscaloffice.summitoh.net is per-parcel only,
-             no bulk name search.)
+  Summit   — propertyaccess.summitoh.net (IasWorld / Tyler commonsearch.aspx —
+             same platform as Stark, identical disclaimer + search flow,
+             different hostname). Lookup-always semantics: even when CourtView
+             provides a "decedent address" (Estate cases), we still verify
+             against the fiscal office because that address is the decedent's
+             *last known residence* — often a senior facility / apartment /
+             relative's home, not a property they owned. Release of
+             Administration cases never have a CourtView address at all.
 
 Every HTTP call routes through `proxy_config.get_requests_proxies()` when
 a proxy_url is supplied — mandatory for production (Apify residential pool)
@@ -451,6 +455,320 @@ def _stark_fetch_datalet_address(
     return (address, city, zip_code)
 
 
+# ── Summit (IasWorld commonsearch.aspx — same platform as Stark) ────
+
+SUMMIT_DISCLAIMER_URL = (
+    "https://propertyaccess.summitoh.net/Search/Disclaimer.aspx"
+    "?FromUrl=../search/commonsearch.aspx?mode=realprop"
+)
+SUMMIT_SEARCH_URL = (
+    "https://propertyaccess.summitoh.net/search/commonsearch.aspx?mode=realprop"
+)
+SUMMIT_DATALET_URL = (
+    "https://propertyaccess.summitoh.net/Datalets/Datalet.aspx"
+)
+
+
+def _summit_session(proxy_url: Optional[str]) -> requests.Session:
+    """Build a requests.Session with proxy + browser-like headers + disclaimer accepted.
+
+    Mirror of `_stark_session` — Summit runs the same Tyler IasWorld stack
+    with identical ASP.NET WebForms ViewState handling and `btAgree=Agree`
+    disclaimer button. Confirmed live 2026-05-02.
+    """
+    sess = requests.Session()
+    proxies = get_requests_proxies(proxy_url)
+    if proxies:
+        sess.proxies.update(proxies)
+    sess.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    })
+    r1 = sess.get(SUMMIT_DISCLAIMER_URL, timeout=30)
+    r1.raise_for_status()
+    aspnet = _stark_extract_aspnet_fields(r1.text)
+    if not aspnet["__VIEWSTATE"]:
+        raise RuntimeError("summit: missing __VIEWSTATE on disclaimer page")
+    r2 = sess.post(
+        SUMMIT_DISCLAIMER_URL,
+        data={
+            **aspnet,
+            "hdURL": "../search/commonsearch.aspx?mode=realprop",
+            "btAgree": "Agree",
+        },
+        headers={
+            "Referer": SUMMIT_DISCLAIMER_URL,
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        timeout=30,
+        allow_redirects=True,
+    )
+    r2.raise_for_status()
+    return sess
+
+
+def _summit_search(
+    sess: requests.Session, search_term: str, *, timeout: int = 30,
+) -> tuple[list[dict], str]:
+    """POST an owner-name search to Summit's commonsearch.aspx. Returns (results, html)."""
+    r = sess.get(SUMMIT_SEARCH_URL, timeout=timeout,
+                 headers={"Referer": SUMMIT_DISCLAIMER_URL})
+    r.raise_for_status()
+    aspnet = _stark_extract_aspnet_fields(r.text)
+    if not aspnet["__VIEWSTATE"]:
+        logger.warning("summit: no ViewState on search page — reinitialising session")
+        return [], ""
+
+    post_data = {
+        **aspnet,
+        "__EVENTTARGET": "",
+        "__EVENTARGUMENT": "",
+        "PageNum": "",
+        "SortBy": "PARID",
+        "SortDir": " asc",
+        "PageSize": "50",
+        "hdAction": "Search",
+        "inpOwner1": search_term,
+        "selSortBy": "PARID",
+        "selSortDir": " asc",
+        "selPageSize": "50",
+        "mode": "REALPROP",
+        "btSearch": "Search",
+    }
+
+    r2 = sess.post(
+        SUMMIT_SEARCH_URL,
+        data=post_data,
+        headers={
+            "Referer": SUMMIT_SEARCH_URL,
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        timeout=timeout,
+        allow_redirects=True,
+    )
+    r2.raise_for_status()
+    return _summit_parse_results(r2.text), r2.text
+
+
+def _summit_parse_results(html: str) -> list[dict]:
+    """Parse Summit's #searchResults table.
+
+    Live observation 2026-05-02: column order is
+      Parcel | Route | Address | Owner | TaxYr
+    (different from Stark's Parcel | Owner | Address | Land Use | Land Use Desc).
+    Land-use classification isn't exposed on the search results page — we'll
+    fetch it via Datalet if needed for residential filtering.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    table = soup.find("table", {"id": "searchResults"})
+    if table is None:
+        return []
+    tbody = table.find("tbody")
+    if tbody is None:
+        # Some IasWorld variants don't use <tbody>; look in the table directly.
+        rows = table.find_all("tr")
+    else:
+        rows = tbody.find_all("tr")
+
+    results: list[dict] = []
+    idx_re = re.compile(r"Datalet\.aspx\?sIndex=\d+&idx=(\d+)")
+
+    for tr in rows:
+        tds = tr.find_all("td")
+        if len(tds) < 4:
+            continue
+        # Skip header row (any th cells)
+        if tr.find("th") is not None:
+            continue
+        # Skip the spacer row (5 cells but parcel cell is empty)
+        parcel_id = tds[1].get_text(strip=True) if len(tds) >= 5 else tds[0].get_text(strip=True)
+        if not parcel_id or not parcel_id.replace("-", "").isalnum():
+            continue
+
+        # Live structure: cells = ['', parcel, route, address, owner, taxyr]
+        # (the first td is an empty checkbox column).
+        if len(tds) >= 6:
+            addr = tds[3].get_text(" ", strip=True)
+            owner = tds[4].get_text(" ", strip=True)
+        elif len(tds) >= 5:
+            # No checkbox column variant
+            addr = tds[2].get_text(" ", strip=True)
+            owner = tds[3].get_text(" ", strip=True)
+        else:
+            continue
+
+        if not owner:
+            continue
+
+        # Datalet idx (search result rows have onclick="selectSearchRow(...)")
+        datalet_idx = ""
+        onclick = tr.get("onclick", "") or ""
+        m = idx_re.search(onclick)
+        if m:
+            datalet_idx = m.group(1)
+
+        results.append({
+            "parcel_id": parcel_id,
+            "owner": owner,
+            "address": addr,
+            "city": "",          # filled by Datalet
+            "zip": "",           # filled by Datalet
+            "classification": "",  # not in results table; fetched via Datalet if needed
+            "datalet_idx": datalet_idx,
+        })
+    return results
+
+
+def _summit_fetch_datalet_address(
+    sess: requests.Session, datalet_idx: str, *, timeout: int = 30,
+) -> tuple[str, str, str]:
+    """Fetch the Summit Datalet detail page and return (address, city, zip).
+
+    Summit's IasWorld variant differs from Stark in two ways (verified live
+    2026-05-02 against parcel 4002617):
+      - Div is named SUMMIT_PARCEL, not PARCEL
+      - Single "Site Address" row combines street + city + zip with `, ,`
+        separators (state is omitted): `8525 OLDE EIGHT UNIT 4 RD , , NORTHFIELD 44067-`
+
+    Falls back to the SUMMIT_OWNER4 mailing-address block (cleaner two-cell
+    format) if Site Address parsing fails.
+    """
+    if not datalet_idx:
+        return ("", "", "")
+    try:
+        r = sess.get(
+            SUMMIT_DATALET_URL,
+            params={"sIndex": "0", "idx": datalet_idx},
+            headers={"Referer": SUMMIT_SEARCH_URL},
+            timeout=timeout,
+        )
+        r.raise_for_status()
+    except requests.RequestException as exc:
+        logger.debug("summit datalet fetch failed (idx=%s): %s", datalet_idx, exc)
+        return ("", "", "")
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    parcel_div = (
+        soup.find("div", {"name": "SUMMIT_PARCEL"})
+        or soup.find("div", {"name": "PARCEL"})
+    )
+    if parcel_div is None:
+        return ("", "", "")
+
+    site_address = ""
+    for tr in parcel_div.find_all("tr"):
+        tds = tr.find_all("td")
+        if len(tds) != 2:
+            continue
+        heading = tds[0].get_text(strip=True).rstrip(":").lower()
+        value = tds[1].get_text(" ", strip=True)
+        if heading == "site address" and not site_address:
+            site_address = value
+            break
+
+    address, city, zip_code = "", "", ""
+    if site_address:
+        # Format: "STREET , [STATE] , CITY ZIP[-NNNN]" (state often empty).
+        parts = [p.strip() for p in site_address.split(",")]
+        parts = [p for p in parts if p]  # drop empty middle (state-omitted)
+        if len(parts) >= 2:
+            address = parts[0]
+            tail = parts[-1]
+            zm = re.search(r"(.*?)\s+(\d{5})(?:-\d{0,4})?\s*$", tail)
+            if zm:
+                city = zm.group(1).strip().title()
+                zip_code = zm.group(2)
+            else:
+                city = tail.title()
+        else:
+            address = parts[0] if parts else site_address
+
+    # Fallback: Mailing-address block has clean two-cell format
+    if not (address and city and zip_code):
+        for div in soup.find_all("div", attrs={"name": True}):
+            if "OWNER" not in (div.get("name") or "").upper():
+                continue
+            mail_addr = ""
+            mail_csz = ""
+            for tr in div.find_all("tr"):
+                tds = tr.find_all("td")
+                if len(tds) != 2:
+                    continue
+                heading = tds[0].get_text(strip=True).rstrip(":").lower()
+                value = tds[1].get_text(" ", strip=True)
+                if heading == "mailing address" and not mail_addr:
+                    mail_addr = value
+                # Owner blocks often have an unlabeled second row with
+                # "CITY OH ZIP" — capture the next td whose text matches.
+                if re.match(r"^[A-Z][A-Z .\-]+\s+OH\s+\d{5}", value):
+                    mail_csz = value
+            if mail_addr:
+                if not address:
+                    address = mail_addr
+                m = re.match(r"^(.*?)\s+OH\s+(\d{5})(?:-\d{4})?$", mail_csz)
+                if m:
+                    if not city:
+                        city = m.group(1).strip().title()
+                    if not zip_code:
+                        zip_code = m.group(2)
+                break
+
+    address = re.sub(r"\s+", " ", address).strip()
+    return (address, city, zip_code)
+
+
+# ── Facility-pattern detection ──────────────────────────────────────
+
+# Conservative — match only signals strongly suggesting multi-unit residential
+# or care facility. Apartments/condos that decedents may legitimately own
+# typically use unit numbers without "Apt"/"Suite" words, so the false-positive
+# rate of clobbering legitimate addresses is low.
+_FACILITY_RE = re.compile(
+    r"(?:\bapt\b\.?|\bsuite\b|\bste\b\.?|\bunit\b)\s*[\w-]+|#\s*\d",
+    re.IGNORECASE,
+)
+# Specific Summit-area senior-living / nursing-home names (extensible).
+_FACILITY_NAMES = (
+    "laurel lake",
+    "sumner pkwy",
+    "sumner health",
+    "rockynol",
+    "altercare",
+    "danbury",
+    "copley health",
+    "summa rehab",
+    "ohio living",
+    "the village at st edward",
+    "briarwood manor",
+    "bath manor",
+    "fairlawn rehab",
+)
+
+
+def _looks_like_facility(address: str) -> bool:
+    """Return True if the address looks like an apartment/care facility/etc.
+
+    Used as a fallback policy: when fiscal-office lookup fails to find a
+    confident match AND the scraper-provided address matches a facility
+    pattern, we discard the address rather than ship it to Sift (where it'd
+    just waste mailings on a senior community / hospital / relative's place).
+    """
+    if not address:
+        return False
+    if _FACILITY_RE.search(address):
+        return True
+    addr_lower = address.lower()
+    for name in _FACILITY_NAMES:
+        if name in addr_lower:
+            return True
+    return False
+
+
 # ── Dispatcher ──────────────────────────────────────────────────────
 
 
@@ -459,25 +777,39 @@ async def lookup_ohio_decedent_properties(
 ) -> None:
     """Look up property addresses for OH probate notices with decedent names.
 
-    Modifies notices in-place, setting address/city/state/zip/parcel_id for
-    each probate notice where the decedent's property can be found. Only
-    touches Cuyahoga and Stark; Summit notices are skipped (their probate
-    pipeline already populates address from CourtView).
+    Modifies notices in-place. Lookup-always semantics: every supported OH
+    probate record gets a fiscal-office name search regardless of whether
+    the scraper already provided an address. This catches:
+      - Cuyahoga + Stark: scrapers never set an address — pure fill-in
+      - Summit ES (Estate) cases: CourtView gives decedent's *last known
+        address* which is sometimes a senior facility / apartment / relative's
+        home, not the property they owned. Lookup verifies + corrects.
+      - Summit ER (Release of Administration) cases: CourtView never has
+        addresses. Lookup is the only path.
+
+    Post-lookup policy:
+      - Confident match found → overwrite address/city/zip/parcel
+      - No match, scraper-provided address looks like a facility/apartment
+        → blank the address (don't ship a wrong residence to Sift)
+      - No match, scraper-provided address looks normal → keep as fallback
 
     Args:
-        notices: List of NoticeData (probate only, state="OH", no address set).
+        notices: List of NoticeData (probate only, state="OH").
         proxy_url: Apify residential proxy URL (threaded into every HTTP call).
             None for direct traffic (CLI/local dev).
     """
     if not notices:
         return
 
-    # Initialize Stark session lazily — many runs won't have any Stark
-    # probates, and disclaimer POST is wasteful when unused.
+    # Lazy-init sessions per county — many runs won't hit every county and
+    # the disclaimer POST is wasteful when unused.
     stark_sess: Optional[requests.Session] = None
+    summit_sess: Optional[requests.Session] = None
 
-    found = 0
-    failed = 0
+    found = 0          # confident match → address (over)written
+    failed = 0         # no match, kept original (or stayed empty)
+    blanked = 0        # no match + facility pattern → address discarded
+    overwrote = 0      # confident match REPLACED an existing address
     skipped = 0
 
     for i, notice in enumerate(notices):
@@ -487,16 +819,12 @@ async def lookup_ohio_decedent_properties(
         if notice.notice_type != "probate":
             skipped += 1
             continue
-        if notice.address:
-            skipped += 1
-            continue
         if not notice.decedent_name:
             skipped += 1
             continue
 
         county = (notice.county or "").lower()
-        if county not in ("cuyahoga", "stark"):
-            # Summit probate already has addresses; anything else is unsupported.
+        if county not in ("cuyahoga", "stark", "summit"):
             skipped += 1
             continue
 
@@ -505,21 +833,27 @@ async def lookup_ohio_decedent_properties(
             skipped += 1
             continue
 
-        # Extract the last name (first token of "LAST FIRST ..."). Both
-        # portals prefix-match on owner, and format varies row-by-row (with
-        # or without comma after the surname), so the safest approach is
-        # search by last-name only and filter client-side by all decedent
-        # name tokens.
+        # Search by last name only — both portals prefix-match on owner and
+        # surname-comma-firstname formatting varies. Filter by name-token
+        # overlap client-side.
         last_name = search_name.split()[0]
 
+        original_address = notice.address  # for facility-pattern fallback
+        had_address_before = bool(original_address)
+
         logger.info(
-            "[%d/%d] Looking up %s property for %s (last=%s)...",
+            "[%d/%d] Looking up %s property for %s (last=%s)%s...",
             i + 1, len(notices), notice.county, search_name, last_name,
+            " [verify-only]" if had_address_before else "",
         )
+
+        best: Optional[dict] = None
+        post_addr = ""
+        post_city = ""
+        post_zip = ""
 
         try:
             if county == "cuyahoga":
-                # Search by last name, then by maiden name if no match.
                 results = _cuy_search(last_name, proxy_url=proxy_url)
                 best = _cuy_pick_best(
                     results, notice.decedent_name, notice.owner_street or "",
@@ -535,23 +869,11 @@ async def lookup_ohio_decedent_properties(
                             notice.owner_street or "",
                         )
                 if best:
-                    notice.address = best["address"]
-                    notice.city = best.get("city", "")
-                    notice.state = "OH"
-                    notice.zip = best.get("zip", "")
-                    notice.parcel_id = best.get("parcel_id", "")
-                    logger.info(
-                        "  Found: %s, %s %s (parcel %s)",
-                        notice.address, notice.city, notice.zip,
-                        notice.parcel_id or "?",
-                    )
-                    found += 1
-                else:
-                    logger.info("  No confident match for %s", search_name)
-                    failed += 1
+                    post_addr = best["address"]
+                    post_city = best.get("city", "")
+                    post_zip = best.get("zip", "")
 
             elif county == "stark":
-                # Stark: lazy-init session (disclaimer POST happens once).
                 if stark_sess is None:
                     try:
                         stark_sess = _stark_session(proxy_url)
@@ -562,7 +884,6 @@ async def lookup_ohio_decedent_properties(
                         )
                         skipped += 1
                         continue
-
                 results, _ = _stark_search(stark_sess, last_name)
                 if not results:
                     maiden_full = _maiden_name_variant(notice.decedent_name)
@@ -570,10 +891,6 @@ async def lookup_ohio_decedent_properties(
                         maiden_last = maiden_full.split()[0]
                         await asyncio.sleep(random.uniform(1.0, 2.0))
                         results, _ = _stark_search(stark_sess, maiden_last)
-
-                # Filter by decedent name-token overlap before residential
-                # pick. inpOwner1=LAST returns 50 rows (PageSize) of all
-                # owners with that surname; only some are the decedent.
                 filtered = [
                     r for r in results
                     if _token_match_score(r["owner"], notice.decedent_name) >= 0.6
@@ -582,33 +899,99 @@ async def lookup_ohio_decedent_properties(
                     filtered, notice.owner_street or "",
                 )
                 if best:
-                    # Fetch Datalet for city/zip
                     addr, city, zip_code = _stark_fetch_datalet_address(
                         stark_sess, best.get("datalet_idx", ""),
                     )
-                    if addr:
-                        notice.address = addr
-                    else:
-                        notice.address = best["address"]
-                    notice.city = city
-                    notice.state = "OH"
-                    notice.zip = zip_code
-                    notice.parcel_id = best.get("parcel_id", "")
-                    logger.info(
-                        "  Found: %s, %s %s (parcel %s)",
-                        notice.address, notice.city or "?",
-                        notice.zip or "?", notice.parcel_id or "?",
+                    post_addr = addr or best["address"]
+                    post_city = city
+                    post_zip = zip_code
+
+            elif county == "summit":
+                if summit_sess is None:
+                    try:
+                        summit_sess = _summit_session(proxy_url)
+                    except Exception as exc:
+                        logger.warning(
+                            "summit: session init failed (%s) — "
+                            "skipping all Summit lookups", exc,
+                        )
+                        skipped += 1
+                        continue
+                results, _ = _summit_search(summit_sess, last_name)
+                if not results:
+                    maiden_full = _maiden_name_variant(notice.decedent_name)
+                    if maiden_full:
+                        maiden_last = maiden_full.split()[0]
+                        await asyncio.sleep(random.uniform(1.0, 2.0))
+                        results, _ = _summit_search(summit_sess, maiden_last)
+                filtered = [
+                    r for r in results
+                    if _token_match_score(r["owner"], notice.decedent_name) >= 0.6
+                ]
+                # TODO: Jr/Sr disambiguation. Token-overlap scores Jr.'s parcel
+                # and Sr.'s parcel identically when decedent name has no
+                # suffix (verified live: Andy L. Hodovan returns 1.00 for both
+                # "HODOVAN ANDY L JR" and "HODOVAN ANDY L AND LINDA C").
+                # Search returns by parcel-ID asc so the lower-numbered parcel
+                # wins, which may not be the decedent's. Mitigation in v2:
+                # prefer "AND" rows (joint with spouse) and penalize JR/SR/II/
+                # III tokens not present in decedent name. Acceptable for v1
+                # because (a) wrong-family member is still a Hodovan-family
+                # lead, (b) we'll see false-positive rate from real data.
+                best = _select_best_property(
+                    filtered, notice.owner_street or "",
+                )
+                if best:
+                    addr, city, zip_code = _summit_fetch_datalet_address(
+                        summit_sess, best.get("datalet_idx", ""),
                     )
-                    found += 1
-                else:
-                    logger.info("  No residential match for %s", search_name)
-                    failed += 1
+                    post_addr = addr or best["address"]
+                    post_city = city
+                    post_zip = zip_code
 
         except Exception as exc:
             logger.warning("  Lookup failed for %s: %s", search_name, exc)
             failed += 1
+            await asyncio.sleep(random.uniform(1.5, 2.5))
+            continue
 
-        # Be polite between requests
+        # ── Post-lookup policy ────────────────────────────────────
+        if best and post_addr:
+            if had_address_before:
+                # Skip overwrite when the scraper-supplied address already
+                # matches what the fiscal office returned (saves churn,
+                # makes overwrite-counter meaningful).
+                if (re.sub(r"\s+", " ", original_address.strip().upper())
+                        != re.sub(r"\s+", " ", post_addr.strip().upper())):
+                    overwrote += 1
+                    logger.info(
+                        "  Overwrote: %r -> %r", original_address, post_addr,
+                    )
+            notice.address = post_addr
+            notice.city = post_city
+            notice.state = "OH"
+            notice.zip = post_zip
+            notice.parcel_id = best.get("parcel_id", "")
+            logger.info(
+                "  Found: %s, %s %s (parcel %s)",
+                notice.address, notice.city or "?",
+                notice.zip or "?", notice.parcel_id or "?",
+            )
+            found += 1
+        elif had_address_before and _looks_like_facility(original_address):
+            notice.address = ""
+            notice.city = ""
+            notice.zip = ""
+            blanked += 1
+            logger.info(
+                "  No match + facility pattern -> blanked %r",
+                original_address,
+            )
+            failed += 1
+        else:
+            logger.info("  No confident match for %s", search_name)
+            failed += 1
+
         await asyncio.sleep(random.uniform(1.5, 2.5))
 
         if (i + 1) % 10 == 0:
@@ -616,6 +999,7 @@ async def lookup_ohio_decedent_properties(
                         i + 1, len(notices))
 
     logger.info(
-        "OH property lookup complete: %d found, %d not found, %d skipped "
-        "(of %d total)", found, failed, skipped, len(notices),
+        "OH property lookup complete: %d found (%d overwrites), %d not found "
+        "(%d facility-blanked), %d skipped (of %d total)",
+        found, overwrote, failed, blanked, skipped, len(notices),
     )

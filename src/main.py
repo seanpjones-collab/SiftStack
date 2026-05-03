@@ -363,6 +363,15 @@ async def actor_main() -> None:
                 len(seen_case_numbers),
             )
 
+            # Snapshot of seen case_nos as they existed at run start.
+            # Used post-dispatch to filter notices against PRIOR runs only —
+            # without this snapshot we'd dedup against records the current
+            # run is in the middle of emitting (which would be wrong: the
+            # CSV write needs to include this run's fresh records).
+            prior_seen_case_numbers: dict[str, set[str]] = {
+                k: set(v) for k, v in seen_case_numbers.items()
+            }
+
             # ── Per-scraper catch-up windows ────────────────────────────
             # Each of the 6 (county, notice_type) scrapers tracks its own
             # last_successful_scrape_date in KVS under
@@ -445,18 +454,36 @@ async def actor_main() -> None:
             def _case_key(notice: NoticeData) -> str:
                 """Extract a stable per-scraper dedup key."""
                 # source_url generally contains ?case_no=... or caseNum=... or
-                # /search/detail/{id}. Fall back to raw_text[0:200] hash.
+                # /search/detail/{id}. Fall back to raw_text scan, then to
+                # ALN's #NN-NNNNN fragment as a last resort.
                 url = notice.source_url or ""
                 m = _re.search(r"(?:case_no|caseNum|CaseNo)=([\w\-]+)", url)
                 if m:
                     return m.group(1)
+                # ALN raw_text now carries `[Case: CV-YYYY-MM-NNNN]` prefix.
+                # DLN raw_text carries `[DLN#NNNNN]`.
+                # Summit probate raw_text carries `[probate] [YYYY ES NNNN]`
+                # (CourtView Wicket exposes only encrypted session tokens in
+                # the URL — the case_no must come from raw_text).
+                raw = notice.raw_text or ""
+                m = _re.search(r"\[Case:\s*(CV-\d{4}-\d{2}-\d{4})\]", raw)
+                if m:
+                    return m.group(1)
+                m = _re.search(r"\[DLN#(\d+)\]", raw)
+                if m:
+                    return f"dln:{m.group(1)}"
+                m = _re.search(r"\[probate\]\s*\[([^\]]+)\]", raw)
+                if m:
+                    return f"probate:{m.group(1).strip()}"
                 m = _re.search(r"/search/detail/(\d+)", url)
                 if m:
                     return f"aln:{m.group(1)}"
-                # DLN rows have [DLN#id] in raw_text
-                m = _re.search(r"\[DLN#(\d+)\]", notice.raw_text or "")
+                # Last-resort fallback: ALN's #NN-NNNNN URL fragment.
+                # Only useful if the CV case_no extraction silently breaks
+                # someday — with the current ALN parser this never fires.
+                m = _re.search(r"#(\d{2}-\d{4,6})\b", url)
                 if m:
-                    return f"dln:{m.group(1)}"
+                    return f"alnref:{m.group(1)}"
                 return ""
 
             def on_batch_sync(batch_notices: list, label: str) -> None:
@@ -539,6 +566,51 @@ async def actor_main() -> None:
             scraper_skipped = dispatch_result["skipped"]
             Actor.log.info("OH dispatcher returned %d notices total", len(notices))
 
+            # ── Cross-run dedup filter (PRE-enrichment) ──────────────
+            # Drop records seen on prior runs so we don't re-enrich and
+            # re-ship them to DataSift. Compares against the snapshot
+            # taken at run start, NOT the live seen_case_numbers (which
+            # has been growing during this run via on_batch_sync). The
+            # current run's records stay in the CSV; only PRIOR-run
+            # republishes are dropped.
+            #
+            # Without this, ALN's 6-week republish cycle was producing
+            # 64% cross-day dupes for Summit foreclosure (verified via
+            # scripts/analyze_cross_day_dupes.py against 8 days of
+            # OneDrive CSVs).
+            if prior_seen_case_numbers:
+                pre_count = len(notices)
+                filtered: list[NoticeData] = []
+                dropped_by_bucket: dict[str, int] = {}
+                for n in notices:
+                    bucket_key = f"{n.county.lower()}:{n.notice_type}"
+                    key = _case_key(n)
+                    if key and key in prior_seen_case_numbers.get(
+                        bucket_key, set()
+                    ):
+                        dropped_by_bucket[bucket_key] = (
+                            dropped_by_bucket.get(bucket_key, 0) + 1
+                        )
+                        continue
+                    filtered.append(n)
+                notices = filtered
+                dropped_total = pre_count - len(notices)
+                if dropped_total:
+                    Actor.log.info(
+                        "Cross-run dedup: dropped %d/%d records seen on "
+                        "prior runs (by bucket: %s)",
+                        dropped_total, pre_count,
+                        ", ".join(
+                            f"{b}={c}" for b, c in
+                            sorted(dropped_by_bucket.items())
+                        ),
+                    )
+                else:
+                    Actor.log.info(
+                        "Cross-run dedup: 0 prior-run dupes in %d records",
+                        pre_count,
+                    )
+
             # Update stark probate high watermark from returned notices
             # (source_url pattern: case_info.asp?case_no=NNNNNN).
             new_high = stark_probate_watermark or 0
@@ -577,9 +649,14 @@ async def actor_main() -> None:
 
             # ── Handle async probate property lookup ────────────────
             # TN (Knox/Blount) uses property_lookup.py (KGIS/TPAD).
-            # OH (Cuyahoga/Stark) uses oh_property_lookup.py (MyPlace JSON
-            # + IasWorld commonsearch.aspx). Summit probate already has
-            # addresses from CourtView case-detail pages.
+            # OH (Cuyahoga/Stark/Summit) uses oh_property_lookup.py (MyPlace
+            # JSON + IasWorld commonsearch.aspx). All three OH counties run
+            # the lookup regardless of whether the scraper already populated
+            # an address — Summit ES cases get CourtView's "decedent address"
+            # which is often a senior facility / apartment / relative's home,
+            # not the property the decedent owned. Lookup-always semantics
+            # let oh_property_lookup verify and overwrite when the fiscal
+            # office disagrees with CourtView.
             tn_probate_notices = [
                 n for n in notices
                 if n.notice_type == "probate" and n.decedent_name
@@ -601,7 +678,7 @@ async def actor_main() -> None:
             oh_probate_notices = [
                 n for n in notices
                 if n.notice_type == "probate" and n.decedent_name
-                and not n.address and n.state == "OH"
+                and n.state == "OH"
             ]
             if oh_probate_notices:
                 try:

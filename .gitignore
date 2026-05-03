@@ -21,6 +21,7 @@ photo_state.json
 # Output (generated data)
 output/
 logs/
+debug_out/
 
 # Python
 __pycache__/

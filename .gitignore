@@ -5,6 +5,9 @@ input.cloud.json
 input_foreclosure_daily.json
 apify_run.log
 apify_cloud.log
+*.pem
+docusign_private_key*
+Docusign RSA Keypair*.txt
 
 # State files (generated at runtime)
 last_run.json
@@ -75,3 +78,4 @@ _tmp_skill/
 autoresearch/
 .pytest_cache/
 tmp/
+.cache/

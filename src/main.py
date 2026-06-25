@@ -669,6 +669,19 @@ async def actor_main() -> None:
             addr_filtered: list[NoticeData] = []
             dropped_addrs: dict[str, int] = {}
             for n in notices:
+                # Probate is EXEMPT from address-dedup. A death is a fresh
+                # motivation signal even if the property previously shipped
+                # (e.g. as a foreclosure), so it must never be suppressed by
+                # the cross-type ledger. It's also unsafe to key probate here:
+                # Cuyahoga/Stark probate has no address yet (filled later by
+                # oh_property_lookup), and Summit probate carries CourtView's
+                # *decedent residence* — often a shared senior facility /
+                # apartment — which produces false-positive drops against
+                # unrelated people at the same address. case_no dedup still
+                # stops the exact same probate case from re-shipping.
+                if (n.notice_type or "").lower() == "probate":
+                    addr_filtered.append(n)
+                    continue
                 k = _addr_key(n)
                 if k and k in prior_seen_addresses:
                     bucket_key = f"{n.county.lower()}:{n.notice_type}"

@@ -26,6 +26,9 @@ output/
 logs/
 debug_out/
 
+# Lead data (PII — names, addresses, phones; never commit)
+input/
+
 # Python
 __pycache__/
 *.pyc

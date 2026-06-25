@@ -128,6 +128,50 @@ def notify_preflight_failure(
     return _send_webhook("\n".join(lines), webhook_url)
 
 
+def notify_heir_build_failure(
+    *,
+    run_label: str,
+    obituary_failed: bool,
+    obituary_error: str = "",
+    deceased_found: int = 0,
+    webhook_url: str | None = None,
+) -> bool:
+    """Loud alert when the heir-building (obituary/Ancestry) step is broken.
+
+    Heir maps silently vanishing — the obituary/Ancestry step failing while
+    the run still "succeeds" — was a real incident (6 days unnoticed before
+    anyone spotted that the Heirs file had stopped appearing). This makes
+    that condition impossible to miss: a red-alert message sent regardless
+    of whether the routine run summary is enabled.
+
+    Args:
+        run_label: Run date/identifier for the alert header.
+        obituary_failed: True if the obituary step crashed / couldn't run.
+        obituary_error: Cause string (when obituary_failed).
+        deceased_found: Deceased-owner count (used for the degraded message
+            when the step ran but produced 0 heir maps).
+        webhook_url: Override webhook (defaults to SLACK_WEBHOOK_URL — the
+            FTM channel, same place the daily summary lands).
+    """
+    if obituary_failed:
+        problem = f"obituary/heir step crashed — {obituary_error}"
+    else:
+        problem = (
+            f"{deceased_found} deceased owner(s) found but 0 heir maps built "
+            "— likely Ancestry login expired or obituary source blocked"
+        )
+    lines = [
+        ":rotating_light: *SiftStack - HEIR DATA NOT BUILT* :rotating_light:",
+        f"*Run:* {run_label}",
+        f"*Problem:* {problem}",
+        "*Impact:* No Heirs file this run. DMs + deep-prospecting PDFs still "
+        "shipped, but signing-chain / heir maps are missing.",
+        "*Action:* Check the Ancestry session + obituary access, then re-run.",
+        f"*Time:* {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+    ]
+    return _send_webhook("\n".join(lines), webhook_url)
+
+
 def _count_by_field(notices: list[NoticeData], field: str) -> dict[str, int]:
     """Count notices grouped by a field value."""
     counts: dict[str, int] = {}

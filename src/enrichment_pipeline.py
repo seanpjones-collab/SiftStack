@@ -59,6 +59,17 @@ class PipelineOptions:
     # Context label for summary logging
     source_label: str = ""
 
+    # ── Obituary/heir result signals (written back by the pipeline) ──
+    # Heir maps silently vanishing — the obituary/Ancestry step failing
+    # while the run still "succeeds" — was a real incident (6 days
+    # unnoticed). The pipeline records concrete outcomes here so the
+    # caller can raise a loud alert instead of discovering it days later.
+    obituary_failed: bool = False     # top-level obituary step crashed / couldn't run
+    obituary_error: str = ""          # human-readable cause
+    heir_build_degraded: bool = False # ran clean but built 0 heir maps for N deceased
+    deceased_found: int = 0
+    heir_maps_built: int = 0
+
 
 # ── Smart detection ──────────────────────────────────────────────────
 
@@ -561,15 +572,27 @@ def run_enrichment_pipeline(
                     confirmed,
                     len(notices),
                 )
-            except ImportError:
-                logger.warning(
-                    "  obituary_enricher not available — skipping"
-                )
+            except ImportError as e:
+                opts.obituary_failed = True
+                opts.obituary_error = f"obituary_enricher import failed: {e}"
+                logger.error("  Step 9 ABORTED — %s", opts.obituary_error)
             except Exception as e:
-                logger.warning("  Obituary enrichment failed: %s", e)
+                opts.obituary_failed = True
+                opts.obituary_error = f"{type(e).__name__}: {e}"
+                logger.error(
+                    "  Step 9 ABORTED — obituary/heir enrichment crashed: %s",
+                    opts.obituary_error,
+                    exc_info=True,
+                )
         else:
-            logger.info(
-                "── Step 9: Obituary (no Anthropic API key configured) ──"
+            # In production the key is always present, so a missing key here
+            # is a misconfiguration that silently kills heir-building — treat
+            # it as a failure, not a benign skip.
+            opts.obituary_failed = True
+            opts.obituary_error = "ANTHROPIC_API_KEY not configured"
+            logger.error(
+                "── Step 9: Obituary SKIPPED — no Anthropic API key; "
+                "heir maps will NOT be built ──"
             )
     elif opts.has_obituary:
         logger.info(
@@ -577,6 +600,33 @@ def run_enrichment_pipeline(
         )
     elif opts.skip_obituary:
         logger.info("── Step 9: Obituary (skipped) ──")
+
+    # ── Step 9a: Heir-build health check ─────────────────────────────
+    # A failure inside Step 9 (Ancestry login expired, obituary source
+    # blocked, API quota) can leave deceased records with no heir maps
+    # while the run otherwise looks fine. Count the actual outcome so the
+    # caller can alert. This is the guardrail against heirs vanishing
+    # silently again.
+    opts.deceased_found = sum(1 for n in notices if n.owner_deceased == "yes")
+    opts.heir_maps_built = sum(1 for n in notices if n.heir_map_json)
+    if not opts.skip_obituary and not opts.has_obituary:
+        if opts.obituary_failed:
+            logger.error(
+                "  Heir health: BROKEN — %s (%d deceased owners, 0 heir maps)",
+                opts.obituary_error, opts.deceased_found,
+            )
+        elif opts.deceased_found and not opts.heir_maps_built:
+            opts.heir_build_degraded = True
+            logger.error(
+                "  Heir health: DEGRADED — %d deceased owners found but 0 "
+                "heir maps built (likely Ancestry login or obituary source)",
+                opts.deceased_found,
+            )
+        else:
+            logger.info(
+                "  Heir health: OK — %d heir maps across %d deceased owners",
+                opts.heir_maps_built, opts.deceased_found,
+            )
 
     # ── Step 9b: Data Validation ────────────────────────────────────
     logger.info("── Step 9b: Data Validation ──")

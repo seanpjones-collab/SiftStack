@@ -216,8 +216,12 @@ def _split_name(full_name: str) -> tuple[str, str]:
     return _clean_and_split_name(full_name)
 
 
-# Map notice_type → DataSift list name for niche sequential marketing.
-# DataSift auto-creates lists from CSV if they don't exist yet.
+# Master list every county-sourced lead lands in, regardless of notice type.
+# Combined with the notice-type list (comma-separated) so filter presets that
+# key on "Foreclosure" / "Probate" / etc. keep working. Mirrors the pattern
+# in scripts/ftm_upload_with_tags.py.
+FTM_LIST_NAME = "First to Market (FTM)"
+
 NOTICE_TYPE_TO_LIST = {
     "foreclosure": "Foreclosure",
     "probate": "Probate",
@@ -691,7 +695,11 @@ def _build_row(notice: NoticeData, notes_override: str | None = None) -> dict:
     """
     contact = _get_contact_info(notice)
     tags = _build_tags(notice)
-    list_name = NOTICE_TYPE_TO_LIST.get(notice.notice_type, "")
+    notice_type_list = NOTICE_TYPE_TO_LIST.get(notice.notice_type, "")
+    list_name = (
+        f"{FTM_LIST_NAME}, {notice_type_list}" if notice_type_list
+        else FTM_LIST_NAME
+    )
     notes = notes_override if notes_override is not None else _build_notes(notice)
 
     # Conditionally map auction_date to the right built-in field

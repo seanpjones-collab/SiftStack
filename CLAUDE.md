@@ -111,6 +111,7 @@ The site is **ASP.NET WebForms** — all navigation uses `__doPostBack()` with V
 ### Apify runtime
 - **Residential proxy required for every OH HTTP call** — `proxy_config.py` wraps Playwright / requests / urllib. Local `apify run` is blocked by the "Proxy external access" account gate; cloud `apify push` works.
 - **Per-scraper KVS catch-up windows** — each scraper tracks `last_successful_{county}_{type}`, scrapes `[last + 1, yesterday]`. Failed scraper holds its date; next run re-attempts the window. Daily cadence = 1 day.
+- **Two-layer cross-run dedup** — `seen_case_numbers` (per-bucket case_no ledger) catches the SAME case across runs (ALN's 6-week republish cycle). `seen_addresses` (global state:zip5:normalized_street ledger) catches the SAME PROPERTY across buckets and across re-filed cases — a foreclosure today + a probate next week for the same address ships only once. Both apply pre-enrichment so we don't pay Smarty/Tracerfy on dupes; both filter against a run-start snapshot so the current run's own records aren't dropped.
 - **Retry wrappers** on Playwright ASP.NET scrapers (cpdocket, clerkweb) — up to 5 attempts with fresh browser context + fresh proxy tunnel. Stark CJIS retries on 403/405/429 WAF codes. ALN login retries on flaky PHP + widened logged-in-state detection.
 - **Slack links use OneDrive share URLs** (anonymous scope, click-free). Apify KVS `get_public_url()` is **async — must be awaited**; fallback path uses signed KVS URLs when OneDrive upload fails.
 
@@ -265,7 +266,7 @@ DataSift.ai (formerly REISift) is the CRM where scraped records land for niche s
 DataSift's niche sequential system uses filter presets to guide records through SMS → Call → Mail → Deep Prospecting phases. Two preset folders: "00 Niche Sequential Marketing" (12 presets, courthouse data) and "01. Bulk Sequential Marketing" (9 presets, bulk data). All 21 presets exclude Sold status (build 1.0.23). A "Sold Property Cleanup" sequence in the Transactions folder auto-fires on "Sold" tag to change status, remove from lists, clear tasks, and clear assignee.
 
 - **"Courthouse Data" tag:** Every record gets this tag — signals first-to-market county data (prioritized over bulk data in filter presets)
-- **Lists column:** Maps `notice_type` → DataSift list name (`foreclosure` → "Foreclosure", `probate` → "Probate", `tax_sale` → "Tax Sale", `tax_delinquent` → "Tax Delinquent", `eviction` → "Eviction", `code_violation` → "Code Violation", `divorce` → "Divorce"). DataSift auto-creates lists from CSV.
+- **Lists column:** Every record lands in the master "First to Market (FTM)" list, comma-joined with its notice-type list (`First to Market (FTM), Foreclosure` / `First to Market (FTM), Probate` / etc.). The wizard's Step 1 list (e.g. "OH FTM 2026-05-08") is a per-day tracking bucket — the persistent membership lives in this CSV column. DataSift auto-creates lists from CSV.
 - **Tags:** Courthouse Data, notice_type, county, YYYY-MM date, deceased/living, DM confidence level, has_auction, tax_delinquent, photo_import (for photo-sourced records)
 
 ### Upload Wizard (5 Steps)

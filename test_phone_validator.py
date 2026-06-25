@@ -31,7 +31,6 @@ load_dotenv()
 from phone_validator import estimate_cost, print_estimate, run_phone_validation
 from datasift_uploader import (
     login, export_phone_enrichment, upload_phone_tags,
-    DATASIFT_LOGIN_URL,
 )
 
 logging.basicConfig(

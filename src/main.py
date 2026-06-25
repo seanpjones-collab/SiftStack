@@ -153,6 +153,8 @@ async def actor_main() -> None:
       - last_run_date                    — daily-mode since-date fallback
       - stark_probate_watermark          — skips 15-GET binary search
       - seen_case_numbers                — per-(county, notice_type) dedup
+      - seen_addresses                   — global property-level dedup
+                                            (state:zip5:normalized_street)
     """
     from apify import Actor
     from time import time as _time
@@ -372,6 +374,22 @@ async def actor_main() -> None:
                 k: set(v) for k, v in seen_case_numbers.items()
             }
 
+            # Property-level dedup ledger. Keyed globally (no per-bucket
+            # split) so the same address can't be re-uploaded just because
+            # a different scraper picked it up: e.g., a Cuyahoga property
+            # in foreclosure on Monday and the same property surfacing in
+            # probate on Friday under a fresh case_no would otherwise both
+            # ship to DataSift. Ledger key: state:zip5:normalized_street.
+            seen_addresses: set[str] = set()
+            _stored_addrs = await kvs.get_value("seen_addresses") or []
+            if isinstance(_stored_addrs, list):
+                seen_addresses = set(_stored_addrs)
+            Actor.log.info(
+                "Loaded %d addresses from cross-run dedup ledger",
+                len(seen_addresses),
+            )
+            prior_seen_addresses: set[str] = set(seen_addresses)
+
             # ── Per-scraper catch-up windows ────────────────────────────
             # Each of the 6 (county, notice_type) scrapers tracks its own
             # last_successful_scrape_date in KVS under
@@ -485,6 +503,37 @@ async def actor_main() -> None:
                 if m:
                     return f"alnref:{m.group(1)}"
                 return ""
+
+            # Common street-suffix abbreviations for canonical-address dedup.
+            # Without this, "123 Main Street" and "123 Main St" become
+            # different ledger entries even though they're the same property.
+            _ADDR_SUFFIX_MAP = {
+                "STREET": "ST", "AVENUE": "AVE", "BOULEVARD": "BLVD",
+                "ROAD": "RD", "DRIVE": "DR", "COURT": "CT", "PLACE": "PL",
+                "LANE": "LN", "CIRCLE": "CIR", "PARKWAY": "PKWY",
+                "HIGHWAY": "HWY", "TERRACE": "TER", "SQUARE": "SQ",
+                "TRAIL": "TRL", "WAY": "WAY",
+            }
+
+            def _addr_key(notice: NoticeData) -> str:
+                """Canonical state:zip5:normalized_street key for cross-run dedup.
+
+                Returns "" when the record can't be reliably keyed (empty
+                address/state/zip). Empty keys are skipped — case_no dedup
+                still covers them.
+                """
+                addr = (notice.address or "").strip().upper()
+                state = (notice.state or "").strip().upper()
+                zip5 = (notice.zip or "").strip()[:5]
+                if not addr or not state or not zip5:
+                    return ""
+                # Strip punctuation, collapse whitespace
+                addr = _re.sub(r"[^\w\s]", " ", addr)
+                addr = _re.sub(r"\s+", " ", addr).strip()
+                # Normalize street-suffix variants
+                parts = [_ADDR_SUFFIX_MAP.get(p, p) for p in addr.split()]
+                addr = " ".join(parts)
+                return f"{state}:{zip5}:{addr}"
 
             def on_batch_sync(batch_notices: list, label: str) -> None:
                 """Called by oh_dispatcher after each (county, notice_type)."""
@@ -610,6 +659,43 @@ async def actor_main() -> None:
                         "Cross-run dedup: 0 prior-run dupes in %d records",
                         pre_count,
                     )
+
+            # Property-level cross-run dedup. Catches dupes the case_no
+            # ledger misses — same address re-filed under a fresh case
+            # number, or the same property surfacing across notice types
+            # (foreclosure → probate, etc.). Filter against the run-start
+            # snapshot so we don't drop the current run's own records.
+            pre_count = len(notices)
+            addr_filtered: list[NoticeData] = []
+            dropped_addrs: dict[str, int] = {}
+            for n in notices:
+                k = _addr_key(n)
+                if k and k in prior_seen_addresses:
+                    bucket_key = f"{n.county.lower()}:{n.notice_type}"
+                    dropped_addrs[bucket_key] = (
+                        dropped_addrs.get(bucket_key, 0) + 1
+                    )
+                    continue
+                if k:
+                    seen_addresses.add(k)
+                addr_filtered.append(n)
+            notices = addr_filtered
+            dropped_addr_total = pre_count - len(notices)
+            if dropped_addr_total:
+                Actor.log.info(
+                    "Address dedup: dropped %d/%d records already in "
+                    "prior-run address ledger (by bucket: %s)",
+                    dropped_addr_total, pre_count,
+                    ", ".join(
+                        f"{b}={c}" for b, c in
+                        sorted(dropped_addrs.items())
+                    ),
+                )
+            else:
+                Actor.log.info(
+                    "Address dedup: 0 prior-run dupes in %d records",
+                    pre_count,
+                )
 
             # Update stark probate high watermark from returned notices
             # (source_url pattern: case_info.asp?case_no=NNNNNN).
@@ -951,6 +1037,33 @@ async def actor_main() -> None:
             # Remove zero-cost entries for cleaner display
             cost_breakdown = {k: v for k, v in cost_breakdown.items() if v > 0}
 
+            # ── Heir-build failure alert (always, if webhook configured) ──
+            # A broken obituary/Ancestry step silently wiped heir maps for
+            # 6 days before anyone noticed the Heirs file had stopped
+            # appearing. Heir-building failure is now a first-class,
+            # impossible-to-miss alert — sent regardless of the routine
+            # summary toggle, before everything else.
+            if config.SLACK_WEBHOOK_URL and (
+                opts.obituary_failed or opts.heir_build_degraded
+            ):
+                try:
+                    from slack_notifier import notify_heir_build_failure
+
+                    notify_heir_build_failure(
+                        run_label=run_date,
+                        obituary_failed=opts.obituary_failed,
+                        obituary_error=opts.obituary_error,
+                        deceased_found=opts.deceased_found,
+                    )
+                    Actor.log.error(
+                        "HEIR-BUILD FAILURE alert sent to Slack: %s "
+                        "(deceased=%d, heir_maps=%d)",
+                        opts.obituary_error or "0 heir maps built",
+                        opts.deceased_found, opts.heir_maps_built,
+                    )
+                except Exception as e:
+                    Actor.log.error("Heir-build alert FAILED to send: %s", e)
+
             if do_notify_slack and config.SLACK_WEBHOOK_URL:
                 try:
                     from slack_notifier import send_slack_notification, _send_webhook
@@ -1032,12 +1145,22 @@ async def actor_main() -> None:
                 for k, v in seen_case_numbers.items()
             }
             await kvs.set_value("seen_case_numbers", serializable_seen)
+
+            # Address ledger: ~50 chars per entry × 30k cap → ~1.5MB worst
+            # case, but Sift CRM rarely sees more than a few thousand
+            # active addresses. sorted() gives a stable trim order if we
+            # ever hit the cap.
+            _ADDR_CAP = 30_000
+            serializable_addrs = sorted(seen_addresses)[-_ADDR_CAP:]
+            await kvs.set_value("seen_addresses", serializable_addrs)
             Actor.log.info(
                 "Saved KVS: last_run_date, stark_probate_watermark=%s, "
-                "seen_case_numbers (%d buckets, %d total case_nos)",
+                "seen_case_numbers (%d buckets, %d total case_nos), "
+                "seen_addresses (%d total)",
                 stark_probate_watermark,
                 len(serializable_seen),
                 sum(len(v) for v in serializable_seen.values()),
+                len(serializable_addrs),
             )
 
             Actor.log.info("Done — %d notices exported (%.1f min)", total, elapsed_min)
@@ -2584,6 +2707,25 @@ def _run_scrape_pipeline(args, counties, types) -> None:
                 logging.info("  Skip trace: %s", upload_result["skip_trace_result"].get("message", ""))
         else:
             logging.error("DataSift upload failed: %s", upload_result.get("message"))
+
+    # Heir-build failure alert — loud, regardless of the summary toggle.
+    # Mirrors the Actor path: heirs vanishing silently must never recur.
+    if config.SLACK_WEBHOOK_URL and (
+        opts.obituary_failed or opts.heir_build_degraded
+    ):
+        from slack_notifier import notify_heir_build_failure
+
+        notify_heir_build_failure(
+            run_label=datetime.now().strftime("%Y-%m-%d"),
+            obituary_failed=opts.obituary_failed,
+            obituary_error=opts.obituary_error,
+            deceased_found=opts.deceased_found,
+        )
+        logging.error(
+            "HEIR-BUILD FAILURE alert sent: %s (deceased=%d, heir_maps=%d)",
+            opts.obituary_error or "0 heir maps built",
+            opts.deceased_found, opts.heir_maps_built,
+        )
 
     # Slack/Discord notification
     if getattr(args, "notify_slack", False):

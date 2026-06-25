@@ -1667,11 +1667,36 @@ async def export_phone_enrichment(
         except Exception as e:
             logger.warning("Export wizard step 1: filter toggle failed: %s — continuing", e)
 
-        # Step 1: Click "Next" to advance past phone filters
+        # Step 1: Click "Next" to advance past phone filters.
+        # The Beamer NPS survey iframe (#npsIframeContainer) can pop up over the
+        # wizard and intercept pointer events, making a native click hang until
+        # timeout (observed 2026-06-04 on the OH FTM run). Dismiss popups first,
+        # then click — falling back to a JS click that bypasses any residual
+        # overlay interception (same pattern as the filter toggles above).
         next_btn = page.locator('button:has-text("Next")')
         if await next_btn.count() > 0:
             logger.info("Export wizard step 1 — clicking Next")
-            await next_btn.first.click()
+            await _dismiss_popups(page)
+            try:
+                await next_btn.first.click(timeout=10000)
+            except Exception as click_err:
+                logger.warning(
+                    "Next click intercepted (%s) — dismissing popups and "
+                    "retrying via JS click", click_err,
+                )
+                await _dismiss_popups(page)
+                clicked = await page.evaluate("""() => {
+                    const root = document.querySelector('[class*="Modal"]') || document;
+                    for (const b of root.querySelectorAll('button')) {
+                        if (b.textContent.trim() === 'Next') { b.click(); return true; }
+                    }
+                    return false;
+                }""")
+                if not clicked:
+                    await _screenshot(page, "export_wizard_next_js_failed")
+                    result["message"] = "Export wizard: Next button click failed (intercepted)"
+                    logger.error(result["message"])
+                    return result
             await page.wait_for_timeout(2000)
         else:
             await _screenshot(page, "export_wizard_no_next")
@@ -1696,6 +1721,10 @@ async def export_phone_enrichment(
             result["message"] = "Export wizard: no Export button on step 2"
             logger.error(result["message"])
             return result
+
+        # Clear any NPS/Beamer overlay before the final click so it isn't
+        # intercepted and misread as a background-processed export.
+        await _dismiss_popups(page)
 
         # Try to catch a direct download (some exports trigger immediately)
         try:

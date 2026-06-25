@@ -793,6 +793,11 @@ async def actor_main() -> None:
                 skip_vacant_filter=include_vacant,
                 skip_commercial_filter=include_commercial,
                 skip_entity_filter=include_entities,
+                # Ancestry is only a fallback (Phase A.5) for deceased owners
+                # the obituary search misses. Disabled on the daily run so a
+                # broken Ancestry login can't drag the pipeline — obituary-based
+                # heir maps are unaffected. Flip back to False to re-enable.
+                skip_ancestry=True,
                 source_label="Apify Actor",
             )
             notices = run_enrichment_pipeline(notices, opts)
